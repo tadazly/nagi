@@ -52,6 +52,94 @@ type InnerSceneProps = NagiSceneProps & {
   audioRef: RefObject<AudioBands>;
 };
 
+const BACKDROP_VERTEX_SHADER = `
+varying vec3 vDirection;
+void main() {
+  vDirection = normalize(position);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const BACKDROP_FRAGMENT_SHADER = `
+precision highp float;
+uniform float uTime;
+uniform float uSeed;
+uniform vec2 uEmotion;
+uniform vec3 uPointer;
+varying vec3 vDirection;
+
+float hash31(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.yzx + 33.33);
+  return fract((p.x + p.y) * p.z);
+}
+
+float noise3(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(hash31(i), hash31(i + vec3(1,0,0)), f.x),
+        mix(hash31(i + vec3(0,1,0)), hash31(i + vec3(1,1,0)), f.x), f.y),
+    mix(mix(hash31(i + vec3(0,0,1)), hash31(i + vec3(1,0,1)), f.x),
+        mix(hash31(i + vec3(0,1,1)), hash31(i + vec3(1,1,1)), f.x), f.y),
+    f.z
+  );
+}
+
+float fbm(vec3 p) {
+  float value = 0.0;
+  float amplitude = 0.52;
+  for (int i = 0; i < 4; i++) {
+    value += noise3(p) * amplitude;
+    p = p * 2.03 + vec3(1.7, 2.9, 1.1);
+    amplitude *= 0.48;
+  }
+  return value;
+}
+
+void main() {
+  vec3 d = normalize(vDirection);
+  float arousal = uEmotion.x;
+  float valence = uEmotion.y;
+  float slowTime = uTime * mix(0.018, 0.075, arousal);
+  float mist = fbm(d * mix(2.2, 4.8, arousal) + vec3(slowTime, -slowTime * 0.7, uSeed * 8.0));
+  float tide = 0.5 + 0.5 * sin(d.y * 5.0 + mist * 3.2 - slowTime * 3.0);
+  float longitude = atan(d.z, d.x);
+  float auroraWave = 0.5 + 0.5 * sin(
+    longitude * 2.6 + d.y * 7.0 + mist * 5.2 + slowTime * 4.0
+  );
+  float aurora = smoothstep(
+    mix(0.68, 0.52, arousal),
+    mix(0.94, 0.84, arousal),
+    auroraWave
+  ) * (0.52 + mist * 0.48);
+  float crystal = pow(
+    abs(sin((abs(d.x) + abs(d.y * 1.3) + abs(d.z * 0.8)) * 21.0 + mist * 3.4)),
+    13.0
+  );
+  float calmWeight = 1.0 - smoothstep(0.2, 0.62, arousal);
+  float crystalWeight = smoothstep(0.56, 0.9, arousal) * (0.52 + (1.0 - valence) * 0.48);
+  float auroraWeight = clamp(1.0 - calmWeight * 0.7 - crystalWeight * 0.45, 0.0, 1.0);
+
+  vec3 calmA = mix(vec3(0.008, 0.018, 0.04), vec3(0.018, 0.052, 0.07), valence);
+  vec3 calmB = mix(vec3(0.06, 0.035, 0.11), vec3(0.025, 0.13, 0.13), valence);
+  vec3 auroraA = mix(vec3(0.16, 0.035, 0.25), vec3(0.02, 0.24, 0.2), valence);
+  vec3 auroraB = mix(vec3(0.18, 0.12, 0.34), vec3(0.38, 0.22, 0.08), valence);
+  vec3 crystalColor = mix(vec3(0.19, 0.06, 0.32), vec3(0.11, 0.3, 0.34), valence);
+
+  vec3 calm = mix(calmA, calmB, tide * 0.65 + mist * 0.25);
+  vec3 veil = mix(auroraA, auroraB, mist) * (0.28 + aurora * 1.08 + mist * 0.14);
+  vec3 facets = crystalColor * (0.1 + crystal * 0.98 + mist * 0.16);
+  vec3 color = calm * calmWeight + veil * auroraWeight + facets * crystalWeight;
+  float pointerGlow = pow(max(dot(d, normalize(vec3(uPointer.xy, 0.7))), 0.0), 18.0);
+  color += mix(vec3(0.05, 0.12, 0.18), vec3(0.18, 0.12, 0.07), valence)
+    * pointerGlow * uPointer.z * 0.34;
+  color *= 0.7 + max(d.y, -0.25) * 0.12;
+  gl_FragColor = vec4(max(color, 0.0), 1.0);
+}
+`;
+
 const CORE_VERTEX_SHADER = `
 uniform float uTime;
 uniform float uSeed;
@@ -59,6 +147,7 @@ uniform float uShape;
 uniform vec4 uAudio;
 uniform vec4 uPointer;
 uniform vec3 uTransport;
+uniform vec2 uEmotion;
 varying vec3 vNormalWorld;
 varying vec3 vPosition;
 varying vec3 vWorldPosition;
@@ -74,11 +163,27 @@ float layeredField(vec3 p) {
 
 void main() {
   vec3 transformed = position;
-  float field = layeredField(position);
-  float fine = sin((position.x + position.y - position.z) * 11.0 + uTime * 0.24) * 0.025;
+  float arousal = uEmotion.x;
+  float valence = uEmotion.y;
+  float tideField = layeredField(position);
+  float ribbonField = sin(
+    atan(position.y, position.x) * 3.0 + position.z * 5.0 - uTime * (0.12 + arousal * 0.2)
+  ) * 0.72;
+  float facetField = abs(sin(
+    (abs(position.x) + abs(position.y * 1.35) + abs(position.z * 0.82)) * 8.0
+    + uTime * 0.08
+  )) - 0.48;
+  float energetic = smoothstep(0.28, 0.76, arousal);
+  float crystalline = smoothstep(0.62, 0.92, arousal) * (0.55 + (1.0 - valence) * 0.45);
+  float field = mix(tideField, ribbonField, energetic);
+  field = mix(field, facetField, crystalline * 0.72);
+  float fine = sin(
+    (position.x + position.y - position.z) * mix(9.0, 17.0, arousal) + uTime * 0.24
+  ) * mix(0.018, 0.036, arousal);
   float interaction = max(uAudio.w, uPointer.z);
   float cursorFacing = max(dot(normalize(position.xy + vec2(0.0001)), normalize(uPointer.xy + vec2(0.0001))), 0.0);
-  float displacement = field * mix(0.12, 0.27, uShape) + fine * (0.45 + uShape);
+  float displacement = field * mix(0.1, 0.3, uShape) * mix(0.72, 1.2, arousal)
+    + fine * (0.45 + uShape);
   displacement += uAudio.x * 0.08 + uTransport.x * 0.014 + interaction * cursorFacing * 0.055;
   transformed += vec3(
     sin(position.y * 2.7 + uTime * 0.13),
@@ -104,6 +209,7 @@ uniform float uSeed;
 uniform float uSparkle;
 uniform vec4 uAudio;
 uniform vec3 uTransport;
+uniform vec2 uEmotion;
 uniform vec3 uColorA;
 uniform vec3 uColorB;
 uniform vec3 uColorC;
@@ -119,7 +225,10 @@ void main() {
   vec3 lightDirection = normalize(vec3(-0.55, 0.72, 0.48));
   float diffuse = max(dot(normal, lightDirection), 0.0);
   float opposite = max(dot(normal, normalize(vec3(0.72, -0.35, 0.4))), 0.0);
-  float band = 0.5 + 0.5 * sin(vPosition.y * (7.0 + uSparkle * 9.0) + uTime * 0.18 + uSeed * 23.0);
+  float band = 0.5 + 0.5 * sin(
+    vPosition.y * (7.0 + uSparkle * 9.0 + uEmotion.x * 6.0)
+    + uTime * (0.14 + uEmotion.x * 0.12) + uSeed * 23.0
+  );
   float caustic = pow(band, 7.0) * (0.08 + uSparkle * 0.24);
   float phraseWave = sin(uTransport.y * 6.2831853);
   float interference = 0.5 + 0.5 * sin((vPosition.x - vPosition.z) * 9.0 - uTime * 0.12 + phraseWave * 0.24);
@@ -129,6 +238,7 @@ void main() {
   color += mix(uColorA, uColorC, interference) * vDisplacement * 0.45;
   color += uColorC * (uAudio.y * 0.11 + uAudio.z * fresnel * 0.22 + uTransport.x * 0.018);
   color = mix(color, color * vec3(1.04, 0.98, 1.08), uTransport.z * 0.08);
+  color = mix(color, color * mix(vec3(0.9, 0.82, 1.18), vec3(1.12, 1.04, 0.82), uEmotion.y), uEmotion.x * 0.16);
   float alpha = 0.9 + fresnel * 0.1;
   gl_FragColor = vec4(max(color, 0.0) * 0.72, alpha);
 }
@@ -171,6 +281,69 @@ function palette(harmony: number, brightness: number) {
   };
 }
 
+function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
+  const materialRef = useRef<THREE.ShaderMaterial>(null);
+  const seedValue = seedToNumber(seedSnapshot.currentSeed) / 4294967295;
+  const uniforms = useMemo(
+    () => ({
+      uEmotion: { value: new THREE.Vector2(0.2, 0.5) },
+      uPointer: { value: new THREE.Vector3() },
+      uSeed: { value: 0 },
+      uTime: { value: 0 },
+    }),
+    [],
+  );
+
+  useFrame((state, delta) => {
+    const material = materialRef.current;
+    if (!material) return;
+    const audio = audioRef.current;
+    const pointer = pointerRef.current;
+    material.uniforms.uTime.value = state.clock.elapsedTime;
+    material.uniforms.uSeed.value = THREE.MathUtils.lerp(
+      material.uniforms.uSeed.value,
+      seedSnapshot.incomingSeed
+        ? THREE.MathUtils.lerp(
+            seedToNumber(seedSnapshot.currentSeed) / 4294967295,
+            seedToNumber(seedSnapshot.incomingSeed) / 4294967295,
+            seedSnapshot.transition,
+          )
+        : seedValue,
+      1 - Math.exp(-delta * 0.55),
+    );
+    material.uniforms.uEmotion.value.x = THREE.MathUtils.lerp(
+      material.uniforms.uEmotion.value.x,
+      audio.arousal,
+      1 - Math.exp(-delta * 0.42),
+    );
+    material.uniforms.uEmotion.value.y = THREE.MathUtils.lerp(
+      material.uniforms.uEmotion.value.y,
+      audio.valence,
+      1 - Math.exp(-delta * 0.42),
+    );
+    material.uniforms.uPointer.value.set(
+      pointer.x * 2 - 1,
+      1 - pointer.y * 2,
+      pointer.targetEnergy,
+    );
+  });
+
+  return (
+    <mesh renderOrder={-10} scale={1}>
+      <sphereGeometry args={[12, 64, 64]} />
+      <shaderMaterial
+        ref={materialRef}
+        uniforms={uniforms}
+        vertexShader={BACKDROP_VERTEX_SHADER}
+        fragmentShader={BACKDROP_FRAGMENT_SHADER}
+        depthTest={false}
+        depthWrite={false}
+        side={THREE.BackSide}
+      />
+    </mesh>
+  );
+}
+
 function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
   const coreRef = useRef<THREE.Mesh>(null);
   const shellRef = useRef<THREE.Mesh>(null);
@@ -187,6 +360,7 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
       uColorA: { value: new THREE.Color('#102b3a') },
       uColorB: { value: new THREE.Color('#75608b') },
       uColorC: { value: new THREE.Color('#d4dbe8') },
+      uEmotion: { value: new THREE.Vector2() },
       uPointer: { value: new THREE.Vector4() },
       uSeed: { value: 0 },
       uShape: { value: 0.5 },
@@ -238,6 +412,7 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
       1 - Math.exp(-delta * 0.8),
     );
     material.uniforms.uAudio.value.set(audio.bass, audio.mid, audio.treble, audio.interaction);
+    material.uniforms.uEmotion.value.set(audio.arousal, audio.valence);
     material.uniforms.uTransport.value.set(audio.pulse, audio.phrase, audio.tension);
     material.uniforms.uPointer.value.set(
       pointer.x * 2 - 1,
@@ -256,9 +431,9 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
 
     const shape = seedSnapshot.profile.shape;
     const targetScale = new THREE.Vector3(
-      0.94 + shape * 0.16,
-      1.05 - shape * 0.12,
-      0.92 + seedSnapshot.profile.depth * 0.12,
+      0.92 + shape * 0.14 + audio.arousal * 0.13,
+      1.08 - shape * 0.1 - audio.arousal * 0.08,
+      0.9 + seedSnapshot.profile.depth * 0.1 + audio.valence * 0.08,
     );
     core.scale.lerp(targetScale, 1 - Math.exp(-delta * 0.55));
     shell.scale
@@ -311,17 +486,27 @@ function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps)
     if (!groupRef.current || !knotRef.current || !satellitesRef.current) return;
     const pointer = pointerRef.current;
     const audio = audioRef.current;
-    groupRef.current.rotation.x += delta * (0.025 + seedSnapshot.profile.flow * 0.035);
+    groupRef.current.rotation.x +=
+      delta * (0.018 + seedSnapshot.profile.flow * 0.03 + audio.arousal * 0.055);
     groupRef.current.rotation.z -= delta * 0.018;
     groupRef.current.rotation.y = THREE.MathUtils.lerp(
       groupRef.current.rotation.y,
       (pointer.x - 0.5) * 0.28 + state.clock.elapsedTime * 0.012,
       0.025,
     );
-    knotRef.current.rotation.y -= delta * (0.045 + audio.mid * 0.08);
+    knotRef.current.rotation.y -=
+      delta * (0.028 + audio.mid * 0.08 + audio.arousal * 0.09);
     knotRef.current.rotation.z += delta * 0.026;
     satellitesRef.current.rotation.y += delta * (0.06 + seedSnapshot.profile.motion * 0.09);
     satellitesRef.current.rotation.x = (pointer.y - 0.5) * 0.3;
+    const moodScale = 0.82 + audio.arousal * 0.42 + audio.valence * 0.08;
+    groupRef.current.scale.setScalar(
+      THREE.MathUtils.lerp(
+        groupRef.current.scale.x,
+        moodScale,
+        1 - Math.exp(-delta * 0.36),
+      ),
+    );
   });
 
   return (
@@ -395,12 +580,14 @@ function SceneController({
     pointer.y += (pointer.targetY - pointer.y) * (1 - Math.exp(-delta * 4.8));
     pointer.targetEnergy *= pointer.down > 0 ? 0.965 : 0.9;
     audioRef.current = engineRef.current?.readAudioBands() ?? {
+      arousal: 0.16,
       bass: 0.025,
       phrase: 0,
       pulse: 0,
       tension: 0,
       mid: 0.018,
       treble: 0.008,
+      valence: 0.5,
       interaction: 0,
     };
 
@@ -444,6 +631,14 @@ function SceneController({
 
   return (
     <>
+      <EmotionBackdrop
+        audioRef={audioRef}
+        diagnosticsRef={diagnosticsRef}
+        engineRef={engineRef}
+        pointerRef={pointerRef}
+        rendererRef={rendererRef}
+        seedSnapshot={seedSnapshot}
+      />
       <ambientLight intensity={0.18} />
       <pointLight ref={lightRef} position={[-2.2, 2.1, 2.8]} color="#9fd8e7" intensity={3} distance={8} />
       <pointLight ref={secondLightRef} position={[2.4, -1.2, 1.8]} color="#c5a2ff" intensity={1.4} distance={7} />
@@ -501,6 +696,7 @@ function PostEffects({ seedSnapshot }: { seedSnapshot: SeedSnapshot }) {
 
 export function NagiScene(props: NagiSceneProps) {
   const audioRef = useRef<AudioBands>({
+    arousal: 0.16,
     bass: 0,
     mid: 0,
     treble: 0,
@@ -508,6 +704,7 @@ export function NagiScene(props: NagiSceneProps) {
     phrase: 0,
     pulse: 0,
     tension: 0,
+    valence: 0.5,
   });
   const [quality, setQuality] = useState(() =>
     typeof window !== 'undefined' && window.innerWidth < 720 ? 1 : 1.45,

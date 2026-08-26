@@ -23,6 +23,7 @@ export type ModeDefinition = {
   id: string;
   intervals: readonly number[];
   name: string;
+  valence: number;
 };
 
 export type MeterDefinition = {
@@ -36,6 +37,7 @@ export type MeterDefinition = {
 export type HarmonicFunction = 'tonic' | 'predominant' | 'dominant' | 'color';
 
 export type HarmonicScene = {
+  arousal: number;
   cadenceBias: number;
   chordColor: number;
   groove: number;
@@ -46,6 +48,7 @@ export type HarmonicScene = {
   tempo: number;
   tension: number;
   tonic: number;
+  valence: number;
 };
 
 export type RhythmRole = 'lead' | 'counter';
@@ -59,6 +62,7 @@ export type RhythmEvent = {
 };
 
 export type MelodyChoiceContext = {
+  backgroundNotes?: readonly number[];
   direction?: -1 | 0 | 1;
   metricStrength?: number;
   mustResolve?: boolean;
@@ -66,21 +70,22 @@ export type MelodyChoiceContext = {
   registerHigh?: number;
   registerLow?: number;
   targetMidi?: number;
+  targetPitchClass?: number;
 };
 
 export const MODES: readonly ModeDefinition[] = [
-  { id: 'ionian', name: 'Ionian', intervals: [0, 2, 4, 5, 7, 9, 11] },
-  { id: 'dorian', name: 'Dorian', intervals: [0, 2, 3, 5, 7, 9, 10] },
-  { id: 'lydian', name: 'Lydian', intervals: [0, 2, 4, 6, 7, 9, 11] },
-  { id: 'mixolydian', name: 'Mixolydian', intervals: [0, 2, 4, 5, 7, 9, 10] },
-  { id: 'aeolian', name: 'Aeolian', intervals: [0, 2, 3, 5, 7, 8, 10] },
-  { id: 'phrygian', name: 'Phrygian', intervals: [0, 1, 3, 5, 7, 8, 10] },
-  { id: 'harmonic-minor', name: 'Harmonic minor', intervals: [0, 2, 3, 5, 7, 8, 11] },
-  { id: 'melodic-minor', name: 'Melodic minor', intervals: [0, 2, 3, 5, 7, 9, 11] },
-  { id: 'harmonic-major', name: 'Harmonic major', intervals: [0, 2, 4, 5, 7, 8, 11] },
-  { id: 'lydian-dominant', name: 'Lydian dominant', intervals: [0, 2, 4, 6, 7, 9, 10] },
-  { id: 'dorian-sharp-four', name: 'Dorian ♯4', intervals: [0, 2, 3, 6, 7, 9, 10] },
-  { id: 'neapolitan-major', name: 'Neapolitan major', intervals: [0, 1, 3, 5, 7, 9, 11] },
+  { id: 'ionian', name: 'Ionian', intervals: [0, 2, 4, 5, 7, 9, 11], valence: 0.82 },
+  { id: 'dorian', name: 'Dorian', intervals: [0, 2, 3, 5, 7, 9, 10], valence: 0.56 },
+  { id: 'lydian', name: 'Lydian', intervals: [0, 2, 4, 6, 7, 9, 11], valence: 0.9 },
+  { id: 'mixolydian', name: 'Mixolydian', intervals: [0, 2, 4, 5, 7, 9, 10], valence: 0.7 },
+  { id: 'aeolian', name: 'Aeolian', intervals: [0, 2, 3, 5, 7, 8, 10], valence: 0.3 },
+  { id: 'phrygian', name: 'Phrygian', intervals: [0, 1, 3, 5, 7, 8, 10], valence: 0.2 },
+  { id: 'harmonic-minor', name: 'Harmonic minor', intervals: [0, 2, 3, 5, 7, 8, 11], valence: 0.28 },
+  { id: 'melodic-minor', name: 'Melodic minor', intervals: [0, 2, 3, 5, 7, 9, 11], valence: 0.48 },
+  { id: 'harmonic-major', name: 'Harmonic major', intervals: [0, 2, 4, 5, 7, 8, 11], valence: 0.54 },
+  { id: 'lydian-dominant', name: 'Lydian dominant', intervals: [0, 2, 4, 6, 7, 9, 10], valence: 0.68 },
+  { id: 'dorian-sharp-four', name: 'Dorian ♯4', intervals: [0, 2, 3, 6, 7, 9, 10], valence: 0.42 },
+  { id: 'neapolitan-major', name: 'Neapolitan major', intervals: [0, 1, 3, 5, 7, 9, 11], valence: 0.36 },
 ] as const;
 
 export const METERS: readonly MeterDefinition[] = [
@@ -236,19 +241,34 @@ export const profileFromSeed = (seed: string): WeatherProfile => {
   };
 };
 
+export const tempoFromArousal = (arousal: number, valence = 0.5) =>
+  clamp(36 + clamp(arousal) ** 1.12 * 57 + (clamp(valence) - 0.5) * 4, 34, 96);
+
+const chooseModeForValence = (valence: number, random: SeededRandom) =>
+  weightedIndex(
+    MODES.map((mode) => 0.08 + Math.exp(-Math.abs(mode.valence - valence) * 5.2)),
+    random,
+  );
+
 export const sceneFromSeed = (seed: string): HarmonicScene => {
   const random = new SeededRandom(seedToNumber(seed) ^ 0xb5297a4d);
+  const arousal = random.between(0.08, 0.9);
+  const valence = random.between(0.16, 0.88);
   return {
+    arousal,
     cadenceBias: random.between(0.18, 0.68),
     chordColor: random.between(0.2, 0.92),
     groove: random.between(0.045, 0.16),
     meterIndex: weightedIndex([0.46, 0.16, 0.3, 0.08], random),
-    modeIndex: Math.floor(random.next() * MODES.length),
-    motifRate: random.between(0.34, 0.82),
-    phraseBars: random.pick([8, 10, 12, 16] as const),
-    tempo: random.between(46, 68),
+    modeIndex: chooseModeForValence(valence, random),
+    motifRate: clamp(0.28 + arousal * 0.62 + random.between(-0.08, 0.08), 0.26, 0.9),
+    phraseBars: arousal < 0.35
+      ? random.pick([12, 16, 16] as const)
+      : random.pick([8, 10, 12, 16] as const),
+    tempo: tempoFromArousal(arousal, valence),
     tension: random.between(0.2, 0.66),
     tonic: Math.floor(random.next() * 12),
+    valence,
   };
 };
 
@@ -276,6 +296,21 @@ export const interpolateProfile = (
 
 export const midiToFrequency = (midi: number) =>
   440 * 2 ** ((midi - 69) / 12);
+
+export const criticalBandwidthHz = (frequency: number) =>
+  25 + 75 * (1 + 1.4 * (frequency / 1000) ** 2) ** 0.69;
+
+export const sensoryRoughness = (midiA: number, midiB: number) => {
+  if (midiA === midiB) return 0;
+  const lowFrequency = midiToFrequency(Math.min(midiA, midiB));
+  const highFrequency = midiToFrequency(Math.max(midiA, midiB));
+  const normalizedDistance =
+    (highFrequency - lowFrequency) /
+    criticalBandwidthHz((lowFrequency + highFrequency) * 0.5);
+  if (normalizedDistance >= 1) return 0;
+  const x = Math.max(0, normalizedDistance);
+  return clamp(5.82 * x * Math.exp(1 - 4 * x) * (1 - x) ** 1.3);
+};
 
 export const sceneName = (scene: HarmonicScene) =>
   `${NOTE_NAMES[scene.tonic]} ${MODES[scene.modeIndex].name}`;
@@ -356,6 +391,7 @@ const voicingCost = (notes: readonly number[], previous: readonly number[]) => {
     const gap = notes[index] - notes[index - 1];
     if (gap < 3) cost += (3 - gap) * 3.2;
     if (gap > 12) cost += (gap - 12) * 0.18;
+    cost += sensoryRoughness(notes[index - 1], notes[index]) * 2.6;
   }
   if (notes[notes.length - 1] - notes[0] > 30) cost += 2.5;
   if (previous.length === 0) return cost;
@@ -414,16 +450,25 @@ export const chooseNeighborScene = (
   random: SeededRandom,
 ): HarmonicScene => {
   const source = scenePitchClasses(scene);
+  const arousal = clamp(scene.arousal + random.between(-0.2, 0.2), 0.06, 0.94);
+  const valence = clamp(scene.valence + random.between(-0.17, 0.17), 0.12, 0.9);
   const keyMoves = [0, 0, 0, 7, 5, 2, 10, 9, 3] as const;
   const candidates: Array<{ modeIndex: number; score: number; tonic: number }> = [];
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const modeIndex = random.next() < 0.58 ? scene.modeIndex : Math.floor(random.next() * MODES.length);
+    const modeIndex = random.next() < 0.5
+      ? scene.modeIndex
+      : chooseModeForValence(valence, random);
     const tonic = pitchClass(scene.tonic + random.pick(keyMoves));
     const target = new Set(
       MODES[modeIndex].intervals.map((interval) => pitchClass(tonic + interval)),
     );
     const shared = [...target].filter((note) => source.has(note)).length;
-    const score = shared + (modeIndex === scene.modeIndex ? 0.45 : 0) + (tonic === scene.tonic ? 0.3 : 0);
+    const moodFit = 1 - Math.abs(MODES[modeIndex].valence - valence);
+    const score =
+      shared +
+      moodFit * 0.7 +
+      (modeIndex === scene.modeIndex ? 0.38 : 0) +
+      (tonic === scene.tonic ? 0.26 : 0);
     candidates.push({ modeIndex, score, tonic });
   }
   candidates.sort((a, b) => b.score - a.score);
@@ -432,16 +477,22 @@ export const chooseNeighborScene = (
     ? scene.meterIndex
     : weightedIndex([0.46, 0.16, 0.3, 0.08], random);
   return {
+    arousal,
     cadenceBias: random.between(0.18, 0.7),
     chordColor: clamp(scene.chordColor + random.between(-0.2, 0.2), 0.2, 0.94),
     groove: clamp(scene.groove + random.between(-0.035, 0.035), 0.035, 0.18),
     meterIndex,
     modeIndex: neighbor.modeIndex,
-    motifRate: clamp(scene.motifRate + random.between(-0.18, 0.18), 0.3, 0.86),
-    phraseBars: random.next() < 0.74 ? scene.phraseBars : random.pick([8, 10, 12, 16] as const),
-    tempo: clamp(scene.tempo + random.between(-3.2, 3.2), 44, 70),
+    motifRate: clamp(0.28 + arousal * 0.62 + random.between(-0.08, 0.08), 0.26, 0.9),
+    phraseBars: random.next() < 0.74
+      ? scene.phraseBars
+      : arousal < 0.35
+        ? random.pick([12, 16, 16] as const)
+        : random.pick([8, 10, 12, 16] as const),
+    tempo: tempoFromArousal(arousal, valence),
     tension: clamp(scene.tension + random.between(-0.18, 0.18), 0.16, 0.72),
     tonic: neighbor.tonic,
+    valence,
   };
 };
 
@@ -587,7 +638,23 @@ export const pickMelodyMidi = (
         if ([1, 2, 10, 11].includes(vertical)) score += 1.8;
         if (vertical === 0) score += 0.72;
       }
-      score += random.between(0, 1.72);
+      if (context.targetPitchClass !== undefined) {
+        const pitchDistance = Math.abs(pitchClass(midi) - pitchClass(context.targetPitchClass));
+        const circularDistance = Math.min(pitchDistance, 12 - pitchDistance);
+        score += circularDistance * 0.42;
+        if (circularDistance === 0) score -= 1.95;
+      }
+      if (context.backgroundNotes) {
+        const roughness = context.backgroundNotes.reduce(
+          (sum, backgroundMidi) => sum + sensoryRoughness(midi, backgroundMidi),
+          0,
+        );
+        score += roughness * (0.45 + metricStrength * 1.05);
+      }
+      const scaleDegree = mode.indexOf(pitchClass(midi - scene.tonic));
+      const tonalStability = [1, 0.44, 0.7, 0.58, 0.9, 0.64, 0.36][scaleDegree] ?? 0.45;
+      score -= tonalStability * (0.18 + metricStrength * 0.52);
+      score += random.between(0, 1.42);
       return { midi, score };
     })
     .sort((a, b) => a.score - b.score);

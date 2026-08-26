@@ -13,17 +13,23 @@ import {
   midiToFrequency,
   nextSeed,
   pickMelodyMidi,
-  planRhythm,
   profileFromSeed,
   sceneFromSeed,
   sceneName,
   seedToNumber,
   smoothstep,
+  tempoFromArousal,
   voiceLeadChord,
   type HarmonicScene,
   type SeedSnapshot,
   type WeatherProfile,
 } from './generative';
+import {
+  createMotif,
+  motifPitchClass,
+  planMotifPhrase,
+  type MotifDNA,
+} from './composition';
 
 type EngineOptions = {
   debugFast?: boolean;
@@ -31,6 +37,7 @@ type EngineOptions = {
 };
 
 export type AudioBands = {
+  arousal: number;
   bass: number;
   interaction: number;
   mid: number;
@@ -38,20 +45,26 @@ export type AudioBands = {
   pulse: number;
   tension: number;
   treble: number;
+  valence: number;
 };
 
 export type NagiDiagnostics = {
   activeSources: number;
+  arousal: number;
   bar: number;
   bass: number;
   beat: number;
   bpm: number;
   chordDegree: number;
   contextState: AudioContextState | 'uninitialized';
+  counterNoteEvents: number;
   currentSeed: string;
   harmonicScene: string;
   incomingSeed: string | null;
   interaction: number;
+  leadMotifCycle: number;
+  leadMotifMutations: number;
+  leadNoteEvents: number;
   maxHumanizeMs: number;
   maxSchedulerJitterMs: number;
   meter: string;
@@ -62,6 +75,7 @@ export type NagiDiagnostics = {
   schedulerRecoveries: number;
   transition: number;
   treble: number;
+  valence: number;
 };
 
 type TransportSegment = {
@@ -91,8 +105,8 @@ type TransportState = {
 };
 
 const PAD_PARTIALS = new Float32Array([0, 1, 0.22, 0.085, 0.032, 0.014, 0.006]);
-const BELL_PARTIALS = new Float32Array([0, 1, 0.08, 0.31, 0.025, 0.12, 0.018, 0.05]);
-const AIR_PARTIALS = new Float32Array([0, 1, 0.34, 0.14, 0.06, 0.026]);
+const BELL_PARTIALS = new Float32Array([0, 1, 0.3, 0.12, 0.052, 0.022, 0.009]);
+const AIR_PARTIALS = new Float32Array([0, 1, 0.19, 0.075, 0.032, 0.013]);
 const SCHEDULER_INTERVAL_MS = 120;
 const SCHEDULE_HORIZON_SECONDS = 3.2;
 
@@ -104,6 +118,7 @@ export class NagiAudioEngine {
   private analyserData?: Uint8Array<ArrayBuffer>;
   private analyserTimeData?: Float32Array<ArrayBuffer>;
   private bands: AudioBands = {
+    arousal: 0,
     bass: 0,
     mid: 0,
     treble: 0,
@@ -111,6 +126,7 @@ export class NagiAudioEngine {
     phrase: 0,
     pulse: 0,
     tension: 0,
+    valence: 0,
   };
   private bellWave?: PeriodicWave;
   private chordDegree = 0;
@@ -120,6 +136,8 @@ export class NagiAudioEngine {
   private currentProfile: WeatherProfile;
   private currentSeed: string;
   private currentVoicing: number[] = [];
+  private currentArousal: number;
+  private currentValence: number;
   private effectsBus?: GainNode;
   private filter?: BiquadFilterNode;
   private globalPanner?: StereoPannerNode;
@@ -132,12 +150,15 @@ export class NagiAudioEngine {
   private interactionY = 0.5;
   private lastInteractionSoundAt = -Infinity;
   private lastCounterMidi = 62;
+  private lastEmotionAt = 0;
   private lastMelodyMidi = 69;
   private lastSnapshotAt = -Infinity;
   private lastTickWall = 0;
   private master?: GainNode;
   private maxHumanizeMs = 0;
   private maxSchedulerJitterMs = 0;
+  private leadNoteEvents = 0;
+  private counterNoteEvents = 0;
   private muted = false;
   private nextFxAt = 0;
   private nextHarmonyAt = 0;
@@ -153,12 +174,17 @@ export class NagiAudioEngine {
   private outputPeak = 0;
   private outputRms = 0;
   private sourceBus?: GainNode;
+  private targetArousal: number;
+  private targetValence: number;
   private timer?: ReturnType<typeof setInterval>;
   private transitionDuration = 0;
   private transitionStartedAt = 0;
   private transportTimeline: TransportSegment[] = [];
+  private transportTempo: number;
   private leadNeedsResolution = false;
   private counterNeedsResolution = false;
+  private leadMotif: MotifDNA;
+  private counterMotif: MotifDNA;
   private volume = 0.72;
   private wet?: GainNode;
 
@@ -167,7 +193,21 @@ export class NagiAudioEngine {
     this.currentProfile = profileFromSeed(seed);
     this.harmonicScene = sceneFromSeed(seed);
     this.random = new SeededRandom(seedToNumber(seed) ^ 0x51f2e9ad);
-    this.chordsUntilSceneChange = 7 + Math.floor(this.random.next() * 7);
+    this.currentArousal = this.harmonicScene.arousal;
+    this.currentValence = this.harmonicScene.valence;
+    this.targetArousal = this.currentArousal;
+    this.targetValence = this.currentValence;
+    this.transportTempo = this.harmonicScene.tempo;
+    this.leadMotif = createMotif(this.random, this.currentArousal, 'lead');
+    this.counterMotif = createMotif(
+      this.random,
+      this.currentArousal,
+      'counter',
+      this.leadMotif,
+    );
+    this.chordsUntilSceneChange = options.debugFast
+      ? 2
+      : 7 + Math.floor(this.random.next() * 7);
     this.options = options;
   }
 
@@ -405,6 +445,8 @@ export class NagiAudioEngine {
     this.bands.pulse += (transport.pulse - this.bands.pulse) * 0.28;
     this.bands.phrase += (transport.phrase - this.bands.phrase) * 0.045;
     this.bands.tension += (transport.tension - this.bands.tension) * 0.035;
+    this.bands.arousal += (this.currentArousal - this.bands.arousal) * 0.08;
+    this.bands.valence += (this.currentValence - this.bands.valence) * 0.08;
     return this.bands;
   }
 
@@ -413,16 +455,21 @@ export class NagiAudioEngine {
     const transport = this.getTransportState(this.context?.currentTime ?? 0);
     return {
       activeSources: this.trackedSources.size,
+      arousal: this.currentArousal,
       bar: transport.bar,
       bass: this.bands.bass,
       beat: transport.beat + transport.beatPhase,
       bpm: transport.bpm,
       chordDegree: transport.chordDegree,
       contextState: this.context?.state ?? 'uninitialized',
+      counterNoteEvents: this.counterNoteEvents,
       currentSeed: snapshot.currentSeed,
       harmonicScene: transport.sceneName,
       incomingSeed: snapshot.incomingSeed,
       interaction: this.bands.interaction,
+      leadMotifCycle: this.leadMotif.cycle,
+      leadMotifMutations: this.leadMotif.mutations,
+      leadNoteEvents: this.leadNoteEvents,
       maxHumanizeMs: Math.round(this.maxHumanizeMs * 10) / 10,
       maxSchedulerJitterMs: Math.round(this.maxSchedulerJitterMs),
       meter: transport.meter,
@@ -433,6 +480,7 @@ export class NagiAudioEngine {
       schedulerRecoveries: this.schedulerRecoveries,
       transition: snapshot.transition,
       treble: this.bands.treble,
+      valence: this.currentValence,
     };
   }
 
@@ -471,6 +519,7 @@ export class NagiAudioEngine {
     const now = context.currentTime;
     const horizon = now + SCHEDULE_HORIZON_SECONDS;
     this.updateSeed(now);
+    this.updateEmotion(now);
     const profile = this.getSnapshot().profile;
     this.updateMix(profile, now);
 
@@ -507,6 +556,19 @@ export class NagiAudioEngine {
     return active;
   }
 
+  private updateEmotion(now: number) {
+    if (this.lastEmotionAt === 0) {
+      this.lastEmotionAt = now;
+      return;
+    }
+    const elapsed = Math.max(0, now - this.lastEmotionAt);
+    this.lastEmotionAt = now;
+    const timeConstant = this.options.debugFast ? 4.5 : 42;
+    const amount = 1 - Math.exp(-elapsed / timeConstant);
+    this.currentArousal += (this.targetArousal - this.currentArousal) * amount;
+    this.currentValence += (this.targetValence - this.currentValence) * amount;
+  }
+
   private getTransportState(at: number): TransportState {
     const segment = this.getTransportSegment(at);
     if (!segment) {
@@ -515,7 +577,7 @@ export class NagiAudioEngine {
         bar: 0,
         beat: 0,
         beatPhase: 0,
-        bpm: this.harmonicScene.tempo,
+        bpm: this.transportTempo,
         chordDegree: this.chordDegree,
         meter: meter.label,
         phrase: 0,
@@ -600,10 +662,19 @@ export class NagiAudioEngine {
   private updateMix(profile: WeatherProfile, now: number) {
     if (!this.filter || !this.wet || !this.globalPanner) return;
     const pointerBrightness = (1 - this.interactionY) * 2300;
-    const cutoff = 4100 + profile.brightness * 4800 + pointerBrightness + this.interactionEnergy * 1600;
+    const emotionalBrightness = this.currentValence * 1300 + this.currentArousal * 900;
+    const cutoff =
+      3300 +
+      profile.brightness * 4100 +
+      emotionalBrightness +
+      pointerBrightness +
+      this.interactionEnergy * 1600;
     this.filter.frequency.setTargetAtTime(cutoff, now, 0.7);
     this.wet.gain.setTargetAtTime(
-      0.24 + profile.space * 0.3 + this.interactionY * 0.06,
+      0.2 +
+        profile.space * 0.28 +
+        (1 - this.currentArousal) * 0.08 +
+        this.interactionY * 0.06,
       now,
       1.8,
     );
@@ -619,8 +690,12 @@ export class NagiAudioEngine {
         const nextScene = chooseNeighborScene(this.harmonicScene, this.random);
         this.chordDegree = findPivotDegree(this.harmonicScene, this.chordDegree, nextScene);
         this.harmonicScene = nextScene;
+        this.targetArousal = nextScene.arousal;
+        this.targetValence = nextScene.valence;
         this.phraseBar = 0;
-        this.chordsUntilSceneChange = 7 + Math.floor(this.random.next() * 8);
+        this.chordsUntilSceneChange = this.options.debugFast
+          ? 2 + Math.floor(this.random.next() * 2)
+          : 7 + Math.floor(this.random.next() * 8);
       } else {
         this.chordDegree = chooseNextDegree(
           this.chordDegree,
@@ -631,16 +706,29 @@ export class NagiAudioEngine {
       }
     }
 
-    const meter = METERS[this.harmonicScene.meterIndex];
-    const beatSeconds = 60 / this.harmonicScene.tempo;
-    const spanBars = chooseChordSpanBars(this.harmonicScene, this.random);
+    const profile = this.getSnapshot().profile;
+    const targetTempo = tempoFromArousal(this.currentArousal, this.currentValence);
+    this.transportTempo = opening
+      ? targetTempo
+      : this.transportTempo + clamp(targetTempo - this.transportTempo, -2.6, 2.6);
+    const color = clamp(
+      this.harmonicScene.chordColor * 0.55 +
+        profile.harmonicHue * 0.2 +
+        this.currentValence * 0.25,
+    );
+    const sceneForChord = {
+      ...this.harmonicScene,
+      arousal: this.currentArousal,
+      chordColor: color,
+      motifRate: clamp(0.26 + this.currentArousal * 0.66, 0.24, 0.92),
+      tempo: this.transportTempo,
+      valence: this.currentValence,
+    };
+    const meter = METERS[sceneForChord.meterIndex];
+    const beatSeconds = 60 / sceneForChord.tempo;
+    const spanBars = chooseChordSpanBars(sceneForChord, this.random);
     const barSeconds = beatSeconds * meter.beatsPerBar;
     const duration = barSeconds * spanBars;
-    const profile = this.getSnapshot().profile;
-    const color = clamp(
-      this.harmonicScene.chordColor * 0.72 + profile.harmonicHue * 0.28,
-    );
-    const sceneForChord = { ...this.harmonicScene, chordColor: color };
     this.currentVoicing = voiceLeadChord(
       sceneForChord,
       this.chordDegree,
@@ -706,17 +794,20 @@ export class NagiAudioEngine {
 
     const filter = context.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = 1050 + profile.brightness * 3100 + index * 145;
+    filter.frequency.value =
+      900 + profile.brightness * 2500 + this.currentArousal * 620 + index * 125;
     filter.Q.value = 0.32 + profile.warmth * 0.32;
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
     const spread = [-0.78, 0.5, -0.22, 0.76, 0.16][index] ?? 0;
     panner.pan.value = spread * profile.spread;
 
-    const attack = opening ? 0.16 + index * 0.035 : Math.min(2.2, duration * 0.24);
+    const attack = opening
+      ? 0.16 + index * 0.035
+      : Math.min(2.4, duration * (0.28 - this.currentArousal * 0.1));
     const release = Math.min(3.4, duration * 0.42);
     const end = start + duration + release;
-    const peak = (opening ? 0.021 : 0.0165) * (0.8 + profile.density * 0.38);
+    const peak = (opening ? 0.0185 : 0.0138) * (0.82 + profile.density * 0.34);
     envelope.gain.setValueAtTime(0.0001, start);
     envelope.gain.exponentialRampToValueAtTime(peak, start + attack);
     envelope.gain.setValueAtTime(peak, start + duration);
@@ -774,20 +865,38 @@ export class NagiAudioEngine {
   ) {
     if (!this.context || !this.effectsBus || !this.bellWave || !this.airWave) return;
     const meter = METERS[scene.meterIndex];
-    const leadEvents = planRhythm(scene, spanBars, this.random, 'lead');
+    const leadEvents = planMotifPhrase(
+      scene,
+      spanBars,
+      this.random,
+      'lead',
+      this.leadMotif,
+      this.phraseBar,
+    );
     const firstGridBeat = 1 / meter.subdivisionsPerBeat;
     if (opening && !leadEvents.some((event) => event.beat <= firstGridBeat)) {
       leadEvents.unshift({
         accent: 0.72,
         beat: firstGridBeat,
+        cycle: this.leadMotif.cycle,
         durationBeats: 0.8,
         humanizeBeats: 0,
         metricStrength: 0.28,
+        motifDegree: this.leadMotif.anchorDegree,
+        motifIndex: 0,
       });
     }
     const counterEvents =
-      profile.density > 0.43 && (opening || this.random.next() < 0.48 + profile.density * 0.28)
-        ? planRhythm(scene, spanBars, this.random, 'counter')
+      profile.density > 0.43 &&
+      (opening || this.random.next() < 0.35 + this.currentArousal * 0.36)
+        ? planMotifPhrase(
+            scene,
+            spanBars,
+            this.random,
+            'counter',
+            this.counterMotif,
+            this.phraseBar,
+          )
         : [];
 
     const scheduleVoice = (role: 'lead' | 'counter') => {
@@ -806,7 +915,13 @@ export class NagiAudioEngine {
           : this.counterNeedsResolution;
         const targetMidi =
           (role === 'lead' ? 70 : 62) + contour * (role === 'lead' ? 4.2 : 3.1);
+        const targetPitchClass = motifPitchClass(scene, event.motifDegree);
+        const backgroundNotes = [
+          ...this.currentVoicing,
+          chordRootMidi(scene, this.chordDegree),
+        ];
         const midi = pickMelodyMidi(scene, this.chordDegree, previous, this.random, {
+          backgroundNotes,
           direction,
           metricStrength: event.metricStrength,
           mustResolve,
@@ -814,17 +929,23 @@ export class NagiAudioEngine {
           registerHigh: role === 'lead' ? 84 : 74,
           registerLow: role === 'lead' ? 60 : 52,
           targetMidi,
+          targetPitchClass,
         });
         if (role === 'lead') {
+          this.leadNoteEvents += 1;
           this.lastMelodyMidi = midi;
           this.leadNeedsResolution = !isChordTone(scene, this.chordDegree, midi);
         } else {
+          this.counterNoteEvents += 1;
           this.lastCounterMidi = midi;
           this.counterNeedsResolution = !isChordTone(scene, this.chordDegree, midi);
         }
         const humanizeSeconds = event.humanizeBeats * beatSeconds;
         this.maxHumanizeMs = Math.max(this.maxHumanizeMs, Math.abs(humanizeSeconds) * 1000);
-        const noteStart = start + event.beat * beatSeconds + humanizeSeconds;
+        const noteStart = Math.max(
+          start + 0.035,
+          start + event.beat * beatSeconds + humanizeSeconds,
+        );
         this.scheduleMotifNote(
           noteStart,
           midi,
@@ -865,20 +986,20 @@ export class NagiAudioEngine {
     filter.Q.value = role === 'lead' ? 0.5 : 0.38;
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
-    const panDirection = role === 'lead' ? 1 : -1;
-    panner.pan.value =
-      ((index / Math.max(1, count - 1)) * 2 - 1) * profile.spread * 0.72 * panDirection;
+    const spatialAnchor = role === 'lead' ? 0.2 : -0.24;
+    const spatialDrift = Math.sin((index / Math.max(1, count)) * Math.PI * 2) * 0.11;
+    panner.pan.value = (spatialAnchor + spatialDrift) * profile.spread;
     const tail = this.random.between(
-      role === 'lead' ? 1.8 : 2.6,
-      role === 'lead' ? 4.2 : 5.1,
+      role === 'lead' ? 1.45 : 2.4,
+      role === 'lead' ? 3.4 : 4.7,
     );
     const duration = Math.max(rhythmicDuration, tail) * (0.84 + profile.space * 0.24);
     const peakBase = role === 'lead'
-      ? this.random.between(0.011, 0.019)
-      : this.random.between(0.0055, 0.0115);
+      ? this.random.between(0.021, 0.033)
+      : this.random.between(0.007, 0.014);
     const peak = peakBase * accent * (0.84 + profile.sparkle * 0.22);
     envelope.gain.setValueAtTime(0.0001, start);
-    envelope.gain.exponentialRampToValueAtTime(peak, start + 0.035);
+    envelope.gain.exponentialRampToValueAtTime(peak, start + (role === 'lead' ? 0.022 : 0.055));
     envelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
     oscillator.connect(filter);
     filter.connect(envelope);

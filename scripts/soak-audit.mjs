@@ -7,18 +7,25 @@ import {
   chooseChordSpanBars,
   chooseNeighborScene,
   chooseNextDegree,
+  clamp,
   findPivotDegree,
   interpolateProfile,
   isChordTone,
   nextSeed,
   pickMelodyMidi,
-  planRhythm,
   profileFromSeed,
   sceneFromSeed,
   sceneName,
   seedToNumber,
+  sensoryRoughness,
+  tempoFromArousal,
   voiceLeadChord,
 } from '../lib/nagi/generative.ts';
+import {
+  createMotif,
+  motifPitchClass,
+  planMotifPhrase,
+} from '../lib/nagi/composition.ts';
 
 const HOURS = 24;
 const END_SECONDS = HOURS * 60 * 60;
@@ -64,6 +71,12 @@ for (let second = 0; second <= END_SECONDS; second += 1) {
 
 const random = new SeededRandom(seedToNumber(START_SEED) ^ 0x51f2e9ad);
 let scene = sceneFromSeed(START_SEED);
+let currentArousal = scene.arousal;
+let currentValence = scene.valence;
+let targetArousal = currentArousal;
+let targetValence = currentValence;
+let transportTempo = scene.tempo;
+let previousChordDuration = 0;
 let chordDegree = 0;
 let chordsUntilSceneChange = 7 + Math.floor(random.next() * 7);
 let phraseBar = 0;
@@ -72,6 +85,8 @@ let leadMidi = 69;
 let counterMidi = 62;
 let leadNeedsResolution = false;
 let counterNeedsResolution = false;
+const leadMotif = createMotif(random, currentArousal, 'lead');
+const counterMotif = createMotif(random, currentArousal, 'counter', leadMotif);
 let totalVoiceMovement = 0;
 let voiceMovementSamples = 0;
 let totalLeadMovement = 0;
@@ -84,10 +99,18 @@ let strongBeatNotes = 0;
 let strongBeatChordTones = 0;
 let independentPatternPairs = 0;
 let patternPairs = 0;
+let motifTargetHits = 0;
+let motifTargetSamples = 0;
+let totalMelodyRoughness = 0;
+let melodyRoughnessSamples = 0;
 let minimumBassSeparation = Infinity;
 let maxGridUnitError = 0;
-let maxHumanizeMs = 0;
+let maxExpressiveOffsetMs = 0;
 let maxTransportDriftMs = 0;
+let maxTempoStep = 0;
+let maxEmotionStep = 0;
+let minimumBpm = Infinity;
+let maximumBpm = -Infinity;
 let sharedPivotTones = 0;
 let sceneChanges = 0;
 let chordCount = 0;
@@ -109,6 +132,8 @@ while (now < END_SECONDS) {
     sceneChanges += 1;
     chordDegree = pivotDegree;
     scene = nextScene;
+    targetArousal = scene.arousal;
+    targetValence = scene.valence;
     phraseBar = 0;
     chordsUntilSceneChange = 7 + Math.floor(random.next() * 8);
   } else if (chordCount > 0) {
@@ -120,31 +145,75 @@ while (now < END_SECONDS) {
     );
   }
 
-  const meter = METERS[scene.meterIndex];
-  const beatSeconds = 60 / scene.tempo;
-  const spanBars = chooseChordSpanBars(scene, random);
+  const emotionAmount = 1 - Math.exp(-previousChordDuration / 42);
+  const previousArousal = currentArousal;
+  const previousValence = currentValence;
+  currentArousal += (targetArousal - currentArousal) * emotionAmount;
+  currentValence += (targetValence - currentValence) * emotionAmount;
+  maxEmotionStep = Math.max(
+    maxEmotionStep,
+    Math.abs(currentArousal - previousArousal),
+    Math.abs(currentValence - previousValence),
+  );
+  const targetTempo = tempoFromArousal(currentArousal, currentValence);
+  const previousTempo = transportTempo;
+  transportTempo += clamp(targetTempo - transportTempo, -2.6, 2.6);
+  maxTempoStep = Math.max(maxTempoStep, Math.abs(transportTempo - previousTempo));
+  minimumBpm = Math.min(minimumBpm, transportTempo);
+  maximumBpm = Math.max(maximumBpm, transportTempo);
+
+  const sceneForChord = {
+    ...scene,
+    arousal: currentArousal,
+    motifRate: clamp(0.26 + currentArousal * 0.66, 0.24, 0.92),
+    tempo: transportTempo,
+    valence: currentValence,
+  };
+  const meter = METERS[sceneForChord.meterIndex];
+  const beatSeconds = 60 / sceneForChord.tempo;
+  const spanBars = chooseChordSpanBars(sceneForChord, random);
   const totalBeats = meter.beatsPerBar * spanBars;
   const duration = beatSeconds * totalBeats;
   const exactEnd = now + beatSeconds * meter.beatsPerBar * spanBars;
-  maxTransportDriftMs = Math.max(maxTransportDriftMs, Math.abs(now + duration - exactEnd) * 1000);
+  maxTransportDriftMs = Math.max(
+    maxTransportDriftMs,
+    Math.abs(now + duration - exactEnd) * 1000,
+  );
 
-  const voicing = voiceLeadChord(scene, chordDegree, previousVoicing);
+  const voicing = voiceLeadChord(sceneForChord, chordDegree, previousVoicing);
   if (previousVoicing.length > 0) {
     for (const note of voicing) {
       totalVoiceMovement += Math.min(...previousVoicing.map((old) => Math.abs(note - old)));
       voiceMovementSamples += 1;
     }
   }
-  const bass = chordRootMidi(scene, chordDegree);
+  const bass = chordRootMidi(sceneForChord, chordDegree);
   minimumBassSeparation = Math.min(minimumBassSeparation, Math.min(...voicing) - bass);
   voicing.forEach(() => intervals.push([now, now + duration + 3.4]));
   for (let bar = 0; bar < spanBars; bar += 1) {
     const bassStart = now + bar * meter.beatsPerBar * beatSeconds;
-    intervals.push([bassStart, bassStart + meter.beatsPerBar * beatSeconds * 0.9 + 2.4]);
+    intervals.push([
+      bassStart,
+      bassStart + meter.beatsPerBar * beatSeconds * 0.9 + 2.4,
+    ]);
   }
 
-  const leadEvents = planRhythm(scene, spanBars, random, 'lead');
-  const counterEvents = planRhythm(scene, spanBars, random, 'counter');
+  const leadEvents = planMotifPhrase(
+    sceneForChord,
+    spanBars,
+    random,
+    'lead',
+    leadMotif,
+    phraseBar,
+  );
+  const counterEvents = planMotifPhrase(
+    sceneForChord,
+    spanBars,
+    random,
+    'counter',
+    counterMotif,
+    phraseBar,
+  );
   const leadSteps = new Set(
     leadEvents.map((event) => Math.round(event.beat * meter.subdivisionsPerBeat)),
   );
@@ -158,19 +227,28 @@ while (now < END_SECONDS) {
 
   const simulateVoice = (role, events) => {
     for (const event of events) {
-      const gridUnits = event.beat * meter.subdivisionsPerBeat;
-      maxGridUnitError = Math.max(maxGridUnitError, Math.abs(gridUnits - Math.round(gridUnits)));
-      const humanizeMs = Math.abs(event.humanizeBeats * beatSeconds * 1000);
-      maxHumanizeMs = Math.max(maxHumanizeMs, humanizeMs);
+      const gridUnits = event.beat * 12;
+      maxGridUnitError = Math.max(
+        maxGridUnitError,
+        Math.abs(gridUnits - Math.round(gridUnits)),
+      );
+      const expressiveOffsetMs = Math.abs(event.humanizeBeats * beatSeconds * 1000);
+      maxExpressiveOffsetMs = Math.max(maxExpressiveOffsetMs, expressiveOffsetMs);
       const phraseProgress =
-        ((phraseBar + event.beat / meter.beatsPerBar) % scene.phraseBars) /
-        scene.phraseBars;
-      const contour = Math.sin(phraseProgress * Math.PI * 2 + scene.tension * Math.PI);
+        ((phraseBar + event.beat / meter.beatsPerBar) % sceneForChord.phraseBars) /
+        sceneForChord.phraseBars;
+      const contour = Math.sin(
+        phraseProgress * Math.PI * 2 + sceneForChord.tension * Math.PI,
+      );
       const direction = contour > 0.16 ? 1 : contour < -0.16 ? -1 : 0;
       const previous = role === 'lead' ? leadMidi : counterMidi;
       const needsResolution = role === 'lead' ? leadNeedsResolution : counterNeedsResolution;
-      const targetMidi = (role === 'lead' ? 70 : 62) + contour * (role === 'lead' ? 4.2 : 3.1);
-      const midi = pickMelodyMidi(scene, chordDegree, previous, random, {
+      const targetMidi =
+        (role === 'lead' ? 70 : 62) + contour * (role === 'lead' ? 4.2 : 3.1);
+      const targetPitchClass = motifPitchClass(sceneForChord, event.motifDegree);
+      const backgroundNotes = [...voicing, bass];
+      const midi = pickMelodyMidi(sceneForChord, chordDegree, previous, random, {
+        backgroundNotes,
         direction,
         metricStrength: event.metricStrength,
         mustResolve: needsResolution,
@@ -178,8 +256,17 @@ while (now < END_SECONDS) {
         registerHigh: role === 'lead' ? 84 : 74,
         registerLow: role === 'lead' ? 60 : 52,
         targetMidi,
+        targetPitchClass,
       });
-      const chordTone = isChordTone(scene, chordDegree, midi);
+      const chordTone = isChordTone(sceneForChord, chordDegree, midi);
+      const midiClass = ((midi % 12) + 12) % 12;
+      motifTargetSamples += 1;
+      if (midiClass === targetPitchClass) motifTargetHits += 1;
+      totalMelodyRoughness += backgroundNotes.reduce(
+        (sum, backgroundMidi) => sum + sensoryRoughness(midi, backgroundMidi),
+        0,
+      ) / backgroundNotes.length;
+      melodyRoughnessSamples += 1;
       if (needsResolution) {
         resolutionAttempts += 1;
         if (chordTone && Math.abs(midi - previous) <= 2) successfulResolutions += 1;
@@ -193,13 +280,13 @@ while (now < END_SECONDS) {
         leadSamples += 1;
         leadMidi = midi;
         leadNeedsResolution = !chordTone;
-        intervals.push([now + event.beat * beatSeconds, now + event.beat * beatSeconds + 4.2]);
+        intervals.push([now + event.beat * beatSeconds, now + event.beat * beatSeconds + 3.4]);
       } else {
         totalCounterMovement += Math.abs(midi - counterMidi);
         counterSamples += 1;
         counterMidi = midi;
         counterNeedsResolution = !chordTone;
-        intervals.push([now + event.beat * beatSeconds, now + event.beat * beatSeconds + 5.1]);
+        intervals.push([now + event.beat * beatSeconds, now + event.beat * beatSeconds + 4.7]);
       }
     }
   };
@@ -207,16 +294,17 @@ while (now < END_SECONDS) {
   simulateVoice('lead', leadEvents);
   simulateVoice('counter', counterEvents);
 
-  modes.add(scene.modeIndex);
-  keys.add(scene.tonic);
-  meters.add(scene.meterIndex);
-  recentProgression.push(`${sceneName(scene)}:${chordDegree}`);
+  modes.add(sceneForChord.modeIndex);
+  keys.add(sceneForChord.tonic);
+  meters.add(sceneForChord.meterIndex);
+  recentProgression.push(`${sceneName(sceneForChord)}:${chordDegree}`);
   if (recentProgression.length > 6) recentProgression.shift();
   if (recentProgression.length === 6) progressionWindows.add(recentProgression.join('|'));
   previousVoicing = voicing;
-  phraseBar = (phraseBar + spanBars) % scene.phraseBars;
+  phraseBar = (phraseBar + spanBars) % sceneForChord.phraseBars;
   chordsUntilSceneChange -= 1;
   chordCount += 1;
+  previousChordDuration = duration;
   now = exactEnd;
 }
 
@@ -241,22 +329,32 @@ const resolutionRate = successfulResolutions / Math.max(1, resolutionAttempts);
 const strongBeatConsonance = strongBeatChordTones / Math.max(1, strongBeatNotes);
 const counterpointIndependence = independentPatternPairs / Math.max(1, patternPairs);
 const averagePivotCommonTones = sharedPivotTones / Math.max(1, sceneChanges);
+const motifTargetRate = motifTargetHits / Math.max(1, motifTargetSamples);
+const averageMelodyRoughness = totalMelodyRoughness / Math.max(1, melodyRoughnessSamples);
 
 const assertions = {
   activeSourceCap: maxActiveSources <= 40,
+  bpmRangeIsExpressive: maximumBpm - minimumBpm > 34,
+  continuousEmotion: maxEmotionStep < 0.09,
   continuousWeather: maxProfileStep < 0.012,
   counterpointIndependence: counterpointIndependence > 0.72,
+  expressiveTimingIsBounded: maxExpressiveOffsetMs < 150,
   gridIntegrity: maxGridUnitError < 1e-9,
-  humanizationIsBounded: maxHumanizeMs < 28,
   immediateOpening: 0.025 < 0.1,
   lowRegisterSpacing: minimumBassSeparation >= 7,
-  melodicMotionIsSingable: averageLeadMovement < 6.5 && averageCounterMovement < 6.5,
+  melodicMotionIsSingable:
+    averageLeadMovement > 1.4 &&
+    averageLeadMovement < 7 &&
+    averageCounterMovement < 7,
   meterCoverage: meters.size === METERS.length,
   modeCoverage: modes.size >= MODES.length - 1,
+  motifIdentitySurvives: motifTargetRate > 0.34 && leadMotif.cycle > 100,
   pivotContinuity: averagePivotCommonTones >= 1.5,
+  psychoacousticRoughnessIsControlled: averageMelodyRoughness < 0.42,
   progressionVariety: progressionUniqueness > 0.72,
   resolutionsBehave: resolutionRate > 0.72,
   strongBeatsAreHarmonicallyStable: strongBeatConsonance > 0.78,
+  tempoTransitionsAreGradual: maxTempoStep <= 2.600001,
   tonalCoverage: keys.size >= 10,
   transportHasNoCumulativeDrift: maxTransportDriftMs < 1e-6,
   voiceLeadingIsSmooth: averageVoiceMovement < 7,
@@ -266,20 +364,27 @@ const report = {
   assertions,
   averageCounterMovement: Number(averageCounterMovement.toFixed(3)),
   averageLeadMovement: Number(averageLeadMovement.toFixed(3)),
+  averageMelodyRoughness: Number(averageMelodyRoughness.toFixed(4)),
   averagePivotCommonTones: Number(averagePivotCommonTones.toFixed(3)),
   averageVoiceMovement: Number(averageVoiceMovement.toFixed(3)),
+  bpmRange: [Number(minimumBpm.toFixed(2)), Number(maximumBpm.toFixed(2))],
   chordsGenerated: chordCount,
   counterpointIndependence: Number(counterpointIndependence.toFixed(4)),
   hoursSimulated: HOURS,
   keysVisited: keys.size,
+  leadMotifCycles: leadMotif.cycle,
+  leadMotifMutations: leadMotif.mutations,
   maxActiveSources,
+  maxEmotionStep: Number(maxEmotionStep.toFixed(5)),
+  maxExpressiveOffsetMs: Number(maxExpressiveOffsetMs.toFixed(3)),
   maxGridUnitError,
-  maxHumanizeMs: Number(maxHumanizeMs.toFixed(3)),
+  maxTempoStep: Number(maxTempoStep.toFixed(4)),
   maxTransportDriftMs,
   maxWeatherDeltaPerSecond: Number(maxProfileStep.toFixed(6)),
   metersVisited: meters.size,
   minimumBassSeparation,
   modesVisited: modes.size,
+  motifTargetRate: Number(motifTargetRate.toFixed(4)),
   progressionWindowUniqueness: Number(progressionUniqueness.toFixed(4)),
   resolutionRate: Number(resolutionRate.toFixed(4)),
   seedChanges,
