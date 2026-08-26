@@ -53,6 +53,7 @@ export default function Home() {
     y: 0.5,
   });
   const seedRef = useRef(FALLBACK_SEED);
+  const startingRef = useRef(false);
   const rendererRef = useRef<NagiRendererDiagnostics>({
     antialias: false,
     drawCalls: 0,
@@ -140,7 +141,8 @@ export default function Home() {
   );
 
   const begin = useCallback(async () => {
-    if (starting || started) return;
+    if (!ready || startingRef.current || engineRef.current || started) return;
+    startingRef.current = true;
     setStarting(true);
     setError('');
     try {
@@ -160,9 +162,10 @@ export default function Home() {
       await engineRef.current?.destroy();
       engineRef.current = null;
     } finally {
+      startingRef.current = false;
       setStarting(false);
     }
-  }, [started, starting]);
+  }, [ready, started]);
 
   const togglePlaying = useCallback(async () => {
     const engine = engineRef.current;
@@ -205,6 +208,9 @@ export default function Home() {
       onPointerDown={(event) => updatePointer(event.clientX, event.clientY, true)}
       onPointerUp={(event) => updatePointer(event.clientX, event.clientY, false)}
       onPointerCancel={(event) => updatePointer(event.clientX, event.clientY, false)}
+      onClick={() => {
+        if (!started) void begin();
+      }}
       onPointerLeave={() => {
         pointerRef.current.targetX = 0.5;
         pointerRef.current.targetY = 0.5;
@@ -249,7 +255,7 @@ export default function Home() {
           aria-label="Enter the NAGI sound space"
         >
           <span aria-hidden="true" />
-          {starting ? 'sound is arriving' : 'enter the quiet'}
+          {starting ? 'sound is arriving' : 'tap anywhere to listen'}
         </button>
       )}
 

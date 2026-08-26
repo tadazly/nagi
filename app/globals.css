@@ -59,6 +59,10 @@ button {
     linear-gradient(145deg, #111726, #050711 72%);
 }
 
+.nagi-shell:not(.has-started) {
+  cursor: pointer;
+}
+
 .nagi-scene,
 .nagi-haze,
 .nagi-grain {
