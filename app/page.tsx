@@ -1,17 +1,26 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import dynamic from 'next/dynamic';
 import type {
   NagiPointerField,
   NagiRendererDiagnostics,
 } from './nagi-scene';
 import {
+  DEFAULT_VOLUME,
+  MAX_VOLUME,
   NagiAudioEngine,
   type NagiDiagnostics,
 } from '../lib/nagi/audio-engine';
 import {
   clamp,
+  initialEmotionFromSeed,
   profileFromSeed,
   randomSeed,
   type SeedSnapshot,
@@ -58,12 +67,16 @@ export default function Home() {
     antialias: false,
     barPhase: 0,
     beatPhase: 0,
+    contextLosses: 0,
     drawCalls: 0,
     fps: 0,
     frames: 0,
+    maxFrameGapMs: 0,
     pointerEnergy: 0,
     pulse: 0,
     quality: 1,
+    styleName: 'mist tide',
+    styleVariant: 0,
     webgl: false,
   });
   const [controlsVisible, setControlsVisible] = useState(false);
@@ -73,13 +86,15 @@ export default function Home() {
   const [ready, setReady] = useState(false);
   const [seedSnapshot, setSeedSnapshot] = useState<SeedSnapshot>({
     currentSeed: FALLBACK_SEED,
+    emotion: initialEmotionFromSeed(FALLBACK_SEED),
+    incomingEmotion: null,
     incomingSeed: null,
     profile: profileFromSeed(FALLBACK_SEED),
     transition: 0,
   });
   const [started, setStarted] = useState(false);
   const [starting, setStarting] = useState(false);
-  const [volume, setVolume] = useState(0.62);
+  const [volume, setVolume] = useState(DEFAULT_VOLUME);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -90,6 +105,8 @@ export default function Home() {
       seedRef.current = seed;
       setSeedSnapshot({
         currentSeed: seed,
+        emotion: initialEmotionFromSeed(seed),
+        incomingEmotion: null,
         incomingSeed: null,
         profile: profileFromSeed(seed),
         transition: 0,
@@ -193,6 +210,54 @@ export default function Home() {
     revealControls();
   }, [muted, revealControls]);
 
+  const randomize = useCallback(() => {
+    const next = randomSeed();
+    const nextEmotion = initialEmotionFromSeed(next);
+    seedRef.current = next;
+    if (engineRef.current) {
+      engineRef.current.transitionToSeed(next);
+      setSeedSnapshot((snapshot) => ({
+        ...snapshot,
+        incomingEmotion: nextEmotion,
+        incomingSeed: next,
+        transition: Math.max(0.025, snapshot.transition),
+      }));
+    } else {
+      setSeedSnapshot({
+        currentSeed: next,
+        emotion: nextEmotion,
+        incomingEmotion: null,
+        incomingSeed: null,
+        profile: profileFromSeed(next),
+        transition: 0,
+      });
+    }
+    revealControls();
+  }, [revealControls]);
+
+  const applyVolume = useCallback(
+    (next: number) => {
+      const safeVolume = clamp(next, 0.04, MAX_VOLUME);
+      setVolume(safeVolume);
+      engineRef.current?.setVolume(safeVolume);
+      if (muted) {
+        setMuted(false);
+        engineRef.current?.setMuted(false);
+      }
+    },
+    [muted],
+  );
+
+  const applyVolumeFromPointer = useCallback(
+    (event: ReactPointerEvent<HTMLInputElement>) => {
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const ratio = clamp((event.clientX - bounds.left) / bounds.width, 0, 1);
+      const next = 0.04 + ratio * (MAX_VOLUME - 0.04);
+      applyVolume(Math.round(next * 100) / 100);
+    },
+    [applyVolume],
+  );
+
   useEffect(
     () => () => {
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
@@ -201,9 +266,11 @@ export default function Home() {
     [],
   );
 
-  const incomingOpacity = seedSnapshot.incomingSeed
-    ? Math.max(0, Math.min(1, (seedSnapshot.transition - 0.58) / 0.34))
+  const incomingProgress = seedSnapshot.incomingSeed
+    ? Math.max(0, Math.min(1, (seedSnapshot.transition + 0.12) / 0.38))
     : 0;
+  const incomingOpacity =
+    incomingProgress * incomingProgress * (3 - 2 * incomingProgress);
 
   return (
     <main
@@ -242,11 +309,16 @@ export default function Home() {
       <section className="nagi-center" aria-labelledby="nagi-title">
         <p className="nagi-kanji" lang="ja">凪</p>
         <h1 id="nagi-title">NAGI</h1>
-        <div className="nagi-seed" aria-label={`current seed ${seedSnapshot.currentSeed}`}>
-          <span style={{ opacity: 1 - incomingOpacity }}>seed {seedSnapshot.currentSeed}</span>
+        <div
+          className="nagi-seed"
+          aria-label={`current musical state ${seedSnapshot.emotion} ${seedSnapshot.currentSeed}`}
+        >
+          <span style={{ opacity: 1 - incomingOpacity }}>
+            {seedSnapshot.emotion} {seedSnapshot.currentSeed}
+          </span>
           {seedSnapshot.incomingSeed && (
             <span style={{ opacity: incomingOpacity }} aria-hidden="true">
-              seed {seedSnapshot.incomingSeed}
+              {seedSnapshot.incomingEmotion} {seedSnapshot.incomingSeed}
             </span>
           )}
         </div>
@@ -285,25 +357,36 @@ export default function Home() {
         >
           {muted ? 'unmute' : 'quiet'}
         </button>
+        <span className="nagi-divider" aria-hidden="true" />
+        <button
+          type="button"
+          onClick={randomize}
+          aria-label="Randomize the musical and visual seed"
+          tabIndex={controlsVisible ? 0 : -1}
+        >
+          random
+        </button>
         <label className="nagi-volume">
           <span className="sr-only">Volume</span>
           <input
             type="range"
-            min="0.06"
-            max="0.9"
+            min="0.04"
+            max={MAX_VOLUME}
             step="0.01"
             value={volume}
             tabIndex={controlsVisible ? 0 : -1}
-            onChange={(event) => {
-              const next = Number(event.target.value);
-              setVolume(next);
-              engineRef.current?.setVolume(next);
-              if (muted) {
-                setMuted(false);
-                engineRef.current?.setMuted(false);
+            onPointerDown={(event) => {
+              event.currentTarget.setPointerCapture(event.pointerId);
+              applyVolumeFromPointer(event);
+            }}
+            onPointerMove={(event) => {
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                applyVolumeFromPointer(event);
               }
             }}
+            onChange={(event) => applyVolume(Number(event.target.value))}
             aria-label="Volume"
+            aria-valuetext={`${Math.round((volume / MAX_VOLUME) * 100)} percent`}
           />
         </label>
       </div>

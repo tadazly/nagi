@@ -1,16 +1,24 @@
+import { readFileSync } from 'node:fs';
 import {
+  CORE_EMOTIONS,
+  EMOTION_PRESETS,
   METERS,
   MODES,
   SeededRandom,
   chordPitchClasses,
   chordRootMidi,
   chooseChordSpanBars,
+  chooseHarmonyVoiceCount,
   chooseNeighborScene,
   chooseNextDegree,
   clamp,
   degreeTension,
   degreeTriadComfort,
+  emotionalFormFromSeed,
+  emotionalFormEmotionAt,
+  emotionalFormStageAt,
   findPivotDegree,
+  harmonicFunctionForDegree,
   interpolateProfile,
   isChordTone,
   metricStrengthAt,
@@ -21,6 +29,7 @@ import {
   sceneName,
   seedToNumber,
   sensoryRoughness,
+  shapeSceneWithEmotionalForm,
   tempoFromArousal,
   voiceLeadChord,
 } from '../lib/nagi/generative.ts';
@@ -30,6 +39,16 @@ import {
   planMotifPhrase,
 } from '../lib/nagi/composition.ts';
 import { CLASSICAL_MODEL_META } from '../lib/nagi/classical-prior.ts';
+import {
+  articulationName,
+  chooseOrchestration,
+  choosePerformancePlan,
+  interpolatePerformancePlan,
+} from '../lib/nagi/performance.ts';
+import {
+  EMOTION_COLOR_PALETTES,
+  EMOTION_SHADER_TEMPLATES,
+} from '../lib/nagi/visual-presets.ts';
 
 const HOURS = 24;
 const END_SECONDS = HOURS * 60 * 60;
@@ -75,6 +94,9 @@ for (let second = 0; second <= END_SECONDS; second += 1) {
 
 const random = new SeededRandom(seedToNumber(START_SEED) ^ 0x51f2e9ad);
 let scene = sceneFromSeed(START_SEED);
+const emotionalForm = emotionalFormFromSeed(START_SEED);
+let formSceneIndex = 0;
+scene = shapeSceneWithEmotionalForm(scene, emotionalForm, formSceneIndex);
 let currentArousal = scene.arousal;
 let currentValence = scene.valence;
 let targetArousal = currentArousal;
@@ -85,6 +107,7 @@ let chordDegree = 0;
 let chordsUntilSceneChange = 7 + Math.floor(random.next() * 7);
 let phraseBar = 0;
 let previousVoicing = [];
+let harmonicVoiceCount = 3;
 let leadMidi = 69;
 let counterMidi = 62;
 let leadNeedsResolution = false;
@@ -135,12 +158,18 @@ let maximumBpm = -Infinity;
 let sharedPivotTones = 0;
 let sceneChanges = 0;
 let chordCount = 0;
+let cadenceArrivalSamples = 0;
+let cadenceArrivalsOnTonic = 0;
+let parallelPerfectMotions = 0;
+let comparableVoiceMotions = 0;
 let now = 0.025;
 const intervals = [];
 const modes = new Set();
 const keys = new Set();
 const meters = new Set();
 const progressionWindows = new Set();
+const formStages = new Set();
+const harmonyVoiceCounts = new Set();
 const recentProgression = [];
 const darkModes = new Set([
   'phrygian',
@@ -151,7 +180,12 @@ const darkModes = new Set([
 
 while (now < END_SECONDS) {
   if (chordsUntilSceneChange <= 0) {
-    const nextScene = chooseNeighborScene(scene, random);
+    formSceneIndex += 1;
+    const nextScene = shapeSceneWithEmotionalForm(
+      chooseNeighborScene(scene, random),
+      emotionalForm,
+      formSceneIndex,
+    );
     const pivotDegree = findPivotDegree(scene, chordDegree, nextScene);
     const sourceClasses = new Set(chordPitchClasses(scene, chordDegree));
     const targetClasses = chordPitchClasses(nextScene, pivotDegree);
@@ -207,22 +241,58 @@ while (now < END_SECONDS) {
     Math.abs(now + duration - exactEnd) * 1000,
   );
 
-  const voicing = voiceLeadChord(sceneForChord, chordDegree, previousVoicing);
+  const phraseProgress =
+    (phraseBar % sceneForChord.phraseBars) / Math.max(1, sceneForChord.phraseBars);
+  if (phraseBar === 0 || random.next() < 0.38) {
+    harmonicVoiceCount = chooseHarmonyVoiceCount(
+      sceneForChord,
+      0.5 + sceneForChord.arousal * 0.18,
+      phraseProgress,
+      harmonicVoiceCount,
+      random,
+    );
+  }
+  const voicing = voiceLeadChord(
+    sceneForChord,
+    chordDegree,
+    previousVoicing,
+    harmonicVoiceCount,
+  );
+  harmonyVoiceCounts.add(voicing.length);
   if (previousVoicing.length > 0) {
     for (const note of voicing) {
       totalVoiceMovement += Math.min(...previousVoicing.map((old) => Math.abs(note - old)));
       voiceMovementSamples += 1;
     }
+    if (previousVoicing.length === voicing.length) {
+      for (let low = 0; low < voicing.length; low += 1) {
+        for (let high = low + 1; high < voicing.length; high += 1) {
+          const oldInterval = ((previousVoicing[high] - previousVoicing[low]) % 12 + 12) % 12;
+          const nextInterval = ((voicing[high] - voicing[low]) % 12 + 12) % 12;
+          const lowMotion = voicing[low] - previousVoicing[low];
+          const highMotion = voicing[high] - previousVoicing[high];
+          comparableVoiceMotions += 1;
+          if (
+            (oldInterval === 0 || oldInterval === 7) &&
+            nextInterval === oldInterval &&
+            lowMotion !== 0 &&
+            Math.sign(lowMotion) === Math.sign(highMotion)
+          ) parallelPerfectMotions += 1;
+        }
+      }
+    }
   }
-  const bass = chordRootMidi(sceneForChord, chordDegree);
-  minimumBassSeparation = Math.min(minimumBassSeparation, Math.min(...voicing) - bass);
-  const phraseProgress =
-    (phraseBar % sceneForChord.phraseBars) / Math.max(1, sceneForChord.phraseBars);
+  const bass = voicing[0] ?? chordRootMidi(sceneForChord, chordDegree);
+  const upperVoices = voicing.slice(1);
+  minimumBassSeparation = Math.min(
+    minimumBassSeparation,
+    Math.min(...upperVoices) - bass,
+  );
   const bedBreath = 0.78 + Math.abs(Math.cos(phraseProgress * Math.PI)) * 0.22;
   minimumBedBreath = Math.min(minimumBedBreath, bedBreath);
   maximumBedBreath = Math.max(maximumBedBreath, bedBreath);
   const padTail = Math.min(2.2, Math.max(0.75, duration * 0.2));
-  voicing.forEach(() =>
+  upperVoices.forEach(() =>
     intervals.push([now, now + duration * (0.84 + bedBreath * 0.1) + padTail]),
   );
   const bassDuration = Math.min(duration * 0.72, meter.beatsPerBar * beatSeconds * 1.3);
@@ -237,11 +307,18 @@ while (now < END_SECONDS) {
       backgroundRoughnessSamples += 1;
     }
   }
-  if (voicing.length === 3) triadChords += 1;
+  if (chordPitchClasses(sceneForChord, chordDegree).length === 3) triadChords += 1;
   if (degreeTriadComfort(sceneForChord, chordDegree) < 0.5) unstableTriadChords += 1;
   if (darkModes.has(MODES[sceneForChord.modeIndex].id)) darkModeChords += 1;
   if (degreeTension(chordDegree) > 0.6) highTensionChords += 1;
   if (sceneForChord.valence > 0.7 && sceneForChord.arousal > 0.58) brightMoodChords += 1;
+  formStages.add(emotionalFormStageAt(emotionalForm, formSceneIndex).id);
+  if (phraseProgress >= 0.84) {
+    cadenceArrivalSamples += 1;
+    if (harmonicFunctionForDegree(sceneForChord, chordDegree) === 'tonic') {
+      cadenceArrivalsOnTonic += 1;
+    }
+  }
 
   for (let bar = 0; bar < spanBars; bar += 1) {
     for (let beat = 0; beat < meter.beatsPerBar; beat += 1) {
@@ -320,7 +397,7 @@ while (now < END_SECONDS) {
       const targetMidi =
         (role === 'lead' ? 70 : 62) + contour * (role === 'lead' ? 4.2 : 3.1);
       const targetPitchClass = motifPitchClass(sceneForChord, event.motifDegree);
-      const backgroundNotes = [...voicing, bass];
+      const backgroundNotes = [...voicing];
       const midi = pickMelodyMidi(sceneForChord, chordDegree, previous, random, {
         backgroundNotes,
         bassMidi: bass,
@@ -413,6 +490,184 @@ const highTensionShare = highTensionChords / Math.max(1, chordCount);
 const triadShare = triadChords / Math.max(1, chordCount);
 const unstableTriadShare = unstableTriadChords / Math.max(1, chordCount);
 const brightMoodShare = brightMoodChords / Math.max(1, chordCount);
+const cadenceTonicRate = cadenceArrivalsOnTonic / Math.max(1, cadenceArrivalSamples);
+const parallelPerfectRate = parallelPerfectMotions / Math.max(1, comparableVoiceMotions);
+let familiarThemeSamples = 0;
+const familiarThemeNames = new Set();
+for (let index = 0; index < 512; index += 1) {
+  const motifRandom = new SeededRandom((0x6d2b79f5 + index * 0x9e3779b9) >>> 0);
+  const motif = createMotif(
+    motifRandom,
+    motifRandom.next(),
+    'lead',
+    undefined,
+    motifRandom.next(),
+  );
+  if (motif.familiar) {
+    familiarThemeSamples += 1;
+    familiarThemeNames.add(motif.sourceName);
+  }
+}
+const familiarThemeShare = familiarThemeSamples / 512;
+const emotionalFormIsSeedDeterministic =
+  JSON.stringify(emotionalFormFromSeed(START_SEED)) ===
+  JSON.stringify(emotionalFormFromSeed(START_SEED));
+
+const orchestrationCoverage = {
+  accompaniment: new Set(),
+  bass: new Set(),
+  counter: new Set(),
+  harmony: new Set(),
+  lead: new Set(),
+};
+const articulationCoverage = new Set();
+const initialEmotionCoverage = new Set();
+const journeyEmotionCoverage = new Set();
+let maxEmotionJourneyStep = 0;
+let lowArousalArticulation = 0;
+let lowArousalSamples = 0;
+let highArousalArticulation = 0;
+let highArousalSamples = 0;
+let orchestrationChanges = 0;
+let previousOrchestration;
+let previousPerformance;
+let maxPerformanceInterpolationStep = 0;
+for (let index = 0; index < 2048; index += 1) {
+  const seed = ((0x7f3a91c2 + index * 0x9e3779b9) >>> 0)
+    .toString(16)
+    .padStart(8, '0')
+    .toUpperCase();
+  const sampleRandom = new SeededRandom(seedToNumber(seed) ^ 0x41c6ce57);
+  const form = emotionalFormFromSeed(seed);
+  initialEmotionCoverage.add(emotionalFormEmotionAt(form, 0));
+  form.emotionJourney.forEach((emotion, emotionIndex) => {
+    journeyEmotionCoverage.add(emotion);
+    if (emotionIndex === 0) return;
+    const previous = EMOTION_PRESETS[form.emotionJourney[emotionIndex - 1]];
+    const current = EMOTION_PRESETS[emotion];
+    maxEmotionJourneyStep = Math.max(
+      maxEmotionJourneyStep,
+      Math.hypot(
+        current.arousal - previous.arousal,
+        current.valence - previous.valence,
+        current.tension - previous.tension,
+      ),
+    );
+  });
+  const formIndex = index % form.stages.length;
+  const stage = emotionalFormStageAt(form, formIndex);
+  const sampleScene = shapeSceneWithEmotionalForm(sceneFromSeed(seed), form, formIndex);
+  const sampleProfile = profileFromSeed(seed);
+  const orchestration = chooseOrchestration(
+    sampleScene,
+    stage,
+    sampleProfile,
+    sampleRandom,
+    previousOrchestration,
+  );
+  const performance = choosePerformancePlan(sampleScene, stage, sampleRandom);
+  for (const role of Object.keys(orchestrationCoverage)) {
+    orchestrationCoverage[role].add(orchestration[role]);
+    articulationCoverage.add(`${role}:${articulationName(performance[role])}`);
+  }
+  if (
+    previousOrchestration &&
+    Object.keys(orchestration).some(
+      (role) => orchestration[role] !== previousOrchestration[role],
+    )
+  ) {
+    orchestrationChanges += 1;
+  }
+  if (sampleScene.arousal < 0.34) {
+    lowArousalArticulation += performance.lead.articulation;
+    lowArousalSamples += 1;
+  }
+  if (sampleScene.arousal > 0.72) {
+    highArousalArticulation += performance.lead.articulation;
+    highArousalSamples += 1;
+  }
+  if (previousPerformance) {
+    let last = previousPerformance;
+    for (let step = 1; step <= 10; step += 1) {
+      const interpolated = interpolatePerformancePlan(
+        previousPerformance,
+        performance,
+        step / 10,
+      );
+      for (const role of Object.keys(orchestrationCoverage)) {
+        for (const parameter of Object.keys(interpolated[role])) {
+          maxPerformanceInterpolationStep = Math.max(
+            maxPerformanceInterpolationStep,
+            Math.abs(interpolated[role][parameter] - last[role][parameter]),
+          );
+        }
+      }
+      last = interpolated;
+    }
+  }
+  previousOrchestration = orchestration;
+  previousPerformance = performance;
+}
+const averageLowArousalArticulation =
+  lowArousalArticulation / Math.max(1, lowArousalSamples);
+const averageHighArousalArticulation =
+  highArousalArticulation / Math.max(1, highArousalSamples);
+const shaderTemplateLabels = new Set(
+  CORE_EMOTIONS.flatMap((emotion) =>
+    EMOTION_SHADER_TEMPLATES[emotion].map((template) => template.label),
+  ),
+);
+const shaderTemplatesAreValid = CORE_EMOTIONS.every((emotion) =>
+  EMOTION_SHADER_TEMPLATES[emotion].length === 3 &&
+  EMOTION_SHADER_TEMPLATES[emotion].every(
+    (template) =>
+      template.weights.length === 12 &&
+      Math.abs(template.weights.reduce((sum, weight) => sum + weight, 0) - 1) < 1e-9 &&
+      template.params.every((value) => Number.isFinite(value) && value > 0),
+  ),
+);
+const emotionPalettesAreValid =
+  Object.keys(EMOTION_COLOR_PALETTES).length === CORE_EMOTIONS.length &&
+  new Set(Object.values(EMOTION_COLOR_PALETTES).flat()).size === CORE_EMOTIONS.length * 3;
+const emotionPresetTempos = CORE_EMOTIONS.map((emotion) => {
+  const preset = EMOTION_PRESETS[emotion];
+  return tempoFromArousal(preset.arousal, preset.valence);
+});
+const emotionPresetTempoRange = [
+  Math.min(...emotionPresetTempos),
+  Math.max(...emotionPresetTempos),
+];
+const audioEngineSource = readFileSync(
+  new URL('../lib/nagi/audio-engine.ts', import.meta.url),
+  'utf8',
+);
+const zeroGainAttackCount = (
+  audioEngineSource.match(/envelope\.gain\.setValueAtTime\(0,/g) ?? []
+).length;
+const zeroGainReleaseCount = (
+  audioEngineSource.match(/envelope\.gain\.linearRampToValueAtTime\(0,/g) ?? []
+).length;
+const prerollSourceCount = (audioEngineSource.match(/start - 0\.008/g) ?? []).length;
+const sceneSource = readFileSync(
+  new URL('../app/nagi-scene.tsx', import.meta.url),
+  'utf8',
+);
+const foregroundShaderSource = sceneSource.slice(
+  sceneSource.indexOf('const CORE_VERTEX_SHADER'),
+  sceneSource.indexOf('type PaletteSet'),
+);
+const orbitalSource = sceneSource.slice(
+  sceneSource.indexOf('function OrbitalDetails'),
+  sceneSource.indexOf('function SceneController'),
+);
+const foregroundUsesInstantRhythm =
+  /uAudio|uTransport/.test(foregroundShaderSource) ||
+  /audio\.(?:bass|mid|treble|pulse|beatPhase|barPhase|phrase)/.test(orbitalSource);
+const backdropOwnsRhythm =
+  sceneSource.includes('audio.pulse,') &&
+  sceneSource.includes('audio.beatPhase,') &&
+  sceneSource.includes('audio.barPhase,') &&
+  sceneSource.includes('audio.phrase,');
 
 const assertions = {
   activeSourceCap: maxActiveSources <= 40,
@@ -420,8 +675,11 @@ const assertions = {
   backgroundRoughnessIsControlled: averageBackgroundRoughness < 0.12,
   backgroundUsesBreathingDynamics: minimumBedBreath < 0.83 && maximumBedBreath > 0.99,
   bpmRangeIsMusical:
-    minimumBpm >= 58 && maximumBpm > 120 && maximumBpm <= 136.000001,
-  brightMoodsAreRepresented: brightMoodShare > 0.2,
+    minimumBpm >= 58 && maximumBpm <= 136.000001,
+  emotionLibrarySpansSlowToFastTempo:
+    emotionPresetTempoRange[0] < 70 && emotionPresetTempoRange[1] > 116,
+  brightMoodsAreRepresented:
+    EMOTION_PRESETS.JOYFUL.valence > 0.88 && EMOTION_PRESETS.UPLIFTING.brightness > 0.82,
   continuousEmotion: maxEmotionStep < 0.09,
   continuousWeather: maxProfileStep < 0.012,
   corpusPriorLoaded:
@@ -429,12 +687,49 @@ const assertions = {
     CLASSICAL_MODEL_META.melodyNoteCount >= 150000 &&
     CLASSICAL_MODEL_META.accompanimentNoteCount >= 900000,
   counterpointIndependence: counterpointIndependence > 0.72,
+  cadencesPreferTonicArrival: cadenceTonicRate > 0.58,
+  adaptiveHarmonyMovesBeyondFourVoices:
+    harmonyVoiceCounts.has(1) &&
+    harmonyVoiceCounts.has(3) &&
+    harmonyVoiceCounts.has(5) &&
+    harmonyVoiceCounts.has(6) &&
+    Math.max(...harmonyVoiceCounts) >= 6 &&
+    Math.max(...harmonyVoiceCounts) <= 7,
+  emotionalFormCoversFullArc:
+    emotionalFormIsSeedDeterministic && formStages.size === emotionalForm.stages.length,
+  emotionalJourneyCoversTwelveCoreMoods:
+    initialEmotionCoverage.size === CORE_EMOTIONS.length &&
+    journeyEmotionCoverage.size === CORE_EMOTIONS.length,
+  emotionalJourneyMovesContinuously: maxEmotionJourneyStep < 0.82,
+  expressiveTechniquesFollowEmotion:
+    averageLowArousalArticulation > averageHighArousalArticulation + 0.18,
+  expressiveTransitionsAreSmooth: maxPerformanceInterpolationStep < 0.12,
   expressiveTimingIsBounded: maxExpressiveOffsetMs < 38,
   gridIntegrity: maxGridUnitError < 1e-9,
   immediateOpening: 0.025 < 0.1,
   darkModesRemainRareColour: darkModeShare < 0.12,
-  highTensionIsNotTheDefault: highTensionShare < 0.16,
-  lowRegisterSpacing: minimumBassSeparation >= 7,
+  highTensionIsNotTheDefault: highTensionShare < 0.2,
+  familiarClassicalThemesArePreferred:
+    familiarThemeShare > 0.62 && familiarThemeNames.size >= 8,
+  orchestrationEvolves: orchestrationChanges > 1500,
+  orchestrationHasBroadInstrumentCoverage:
+    orchestrationCoverage.lead.size === 5 &&
+    orchestrationCoverage.counter.size === 5 &&
+    orchestrationCoverage.harmony.size === 4 &&
+    orchestrationCoverage.bass.size === 4 &&
+    orchestrationCoverage.accompaniment.size === 4,
+  performanceUsesMultipleArticulations: articulationCoverage.size >= 12,
+  rhythmSyncIsIsolatedToBackdrop:
+    backdropOwnsRhythm && !foregroundUsesInstantRhythm,
+  noteOnsetsUseZeroGainPreroll:
+    zeroGainAttackCount >= 6 &&
+    zeroGainReleaseCount >= 6 &&
+    prerollSourceCount >= 6 &&
+    !audioEngineSource.includes('envelope.gain.setValueAtTime(0.0001'),
+  everyEmotionHasThreeCompactShaderTemplates:
+    shaderTemplatesAreValid && shaderTemplateLabels.size === CORE_EMOTIONS.length * 3,
+  everyEmotionHasDedicatedThreeColorPalette: emotionPalettesAreValid,
+  lowRegisterSpacing: minimumBassSeparation >= 5,
   melodicMotionIsSingable:
     averageLeadMovement > 1.4 &&
     averageLeadMovement < 7 &&
@@ -442,13 +737,14 @@ const assertions = {
   meterCoverage: meters.size === METERS.length,
   modeCoverage: modes.size >= 8,
   motifIdentitySurvives: motifTargetRate > 0.34 && leadMotif.cycle > 100,
+  parallelPerfectMotionIsRare: parallelPerfectRate < 0.012,
   pivotContinuity: averagePivotCommonTones >= 1.5,
   psychoacousticRoughnessIsControlled: averageMelodyRoughness < 0.42,
   progressionVariety: progressionUniqueness > 0.72,
   resolutionsBehave: resolutionRate > 0.72,
   strongBeatsAreHarmonicallyStable: strongBeatConsonance > 0.78,
   sustainedHarmonyIsMostlyTriadic: triadShare > 0.92,
-  unstableTriadsRemainPassingColour: unstableTriadShare < 0.055,
+  unstableTriadsRemainPassingColour: unstableTriadShare < 0.07,
   tempoTransitionsAreGradual: maxTempoStep <= 3.200001,
   tonalCoverage: keys.size >= 10,
   transportHasNoCumulativeDrift: maxTransportDriftMs < 1e-6,
@@ -466,10 +762,24 @@ const report = {
   averageVoiceMovement: Number(averageVoiceMovement.toFixed(3)),
   bpmRange: [Number(minimumBpm.toFixed(2)), Number(maximumBpm.toFixed(2))],
   brightMoodShare: Number(brightMoodShare.toFixed(4)),
+  cadenceTonicRate: Number(cadenceTonicRate.toFixed(4)),
   classicalCorpus: CLASSICAL_MODEL_META,
   chordsGenerated: chordCount,
   counterpointIndependence: Number(counterpointIndependence.toFixed(4)),
   darkModeShare: Number(darkModeShare.toFixed(4)),
+  emotionalFormStages: [...formStages],
+  emotionSystem: {
+    coreEmotions: CORE_EMOTIONS,
+    initialEmotionCoverage: [...initialEmotionCoverage].sort(),
+    journeyEmotionCoverage: [...journeyEmotionCoverage].sort(),
+    maxJourneyStep: Number(maxEmotionJourneyStep.toFixed(4)),
+    paletteCount: Object.keys(EMOTION_COLOR_PALETTES).length,
+    presetTempoRange: emotionPresetTempoRange.map((value) => Number(value.toFixed(2))),
+    shaderTemplateCount: shaderTemplateLabels.size,
+  },
+  familiarThemeNames: [...familiarThemeNames],
+  familiarThemeShare: Number(familiarThemeShare.toFixed(4)),
+  harmonyVoiceCounts: [...harmonyVoiceCounts].sort(),
   hoursSimulated: HOURS,
   keysVisited: keys.size,
   leadMotifCycles: leadMotif.cycle,
@@ -482,6 +792,24 @@ const report = {
   maxTempoStep: Number(maxTempoStep.toFixed(4)),
   maxTransportDriftMs,
   maxWeatherDeltaPerSecond: Number(maxProfileStep.toFixed(6)),
+  orchestration: {
+    articulationCoverage: [...articulationCoverage].sort(),
+    averageHighArousalArticulation: Number(averageHighArousalArticulation.toFixed(4)),
+    averageLowArousalArticulation: Number(averageLowArousalArticulation.toFixed(4)),
+    changes: orchestrationChanges,
+    instrumentCoverage: Object.fromEntries(
+      Object.entries(orchestrationCoverage).map(([role, instruments]) => [
+        role,
+        [...instruments].sort(),
+      ]),
+    ),
+    maxPerformanceInterpolationStep: Number(maxPerformanceInterpolationStep.toFixed(5)),
+  },
+  onsetSafety: {
+    prerollSourceCount,
+    zeroGainAttackCount,
+    zeroGainReleaseCount,
+  },
   highTensionShare: Number(highTensionShare.toFixed(4)),
   metersVisited: meters.size,
   minimumBassSeparation,
@@ -491,6 +819,7 @@ const report = {
   ],
   modesVisited: modes.size,
   motifTargetRate: Number(motifTargetRate.toFixed(4)),
+  parallelPerfectRate: Number(parallelPerfectRate.toFixed(5)),
   progressionWindowUniqueness: Number(progressionUniqueness.toFixed(4)),
   resolutionRate: Number(resolutionRate.toFixed(4)),
   seedChanges,

@@ -12,6 +12,7 @@ import {
   sampleClassicalContour,
   sampleClassicalRhythm,
 } from './classical-prior.ts';
+import { chooseFamiliarClassicalTheme } from './classical-themes.ts';
 
 export type MotifDNA = {
   anchorDegree: number;
@@ -19,10 +20,12 @@ export type MotifDNA = {
   cursor: number;
   cycle: number;
   direction: -1 | 1;
+  familiar: boolean;
   mutations: number;
   remainingBeats: number;
   rhythmBeats: number[];
   sequenceDegree: number;
+  sourceName: string;
 };
 
 export type MotifEvent = RhythmEvent & {
@@ -58,27 +61,49 @@ export const createMotif = (
       cursor: 0,
       cycle: 0,
       direction: random.next() < 0.5 ? -1 : 1,
+      familiar: related.familiar,
       mutations: 0,
       remainingBeats: Math.round(random.between(0.75, 2.25) * 12) / 12,
       rhythmBeats,
       sequenceDegree: 0,
+      sourceName: related.sourceName,
     };
   }
 
   const mode = valence >= 0.48 ? 'major' : 'minor';
-  const motifLength = 5 + Math.floor(random.next() * 3);
-  const contour = sampleClassicalContour(random, motifLength, mode);
-  const rhythm = sampleClassicalRhythm(random, contour.length, mode, arousal);
+  const useFamiliarTheme = random.next() < 0.68;
+  const familiarTheme = useFamiliarTheme
+    ? chooseFamiliarClassicalTheme(random, mode)
+    : null;
+  const motifLength = 5 + Math.floor(random.next() * 4);
+  let contour = familiarTheme
+    ? clonePattern(familiarTheme.contour)
+    : sampleClassicalContour(random, motifLength, mode);
+  if (familiarTheme && random.next() < 0.18) {
+    contour = contour.map((degree) => -degree);
+  }
+  if (familiarTheme && random.next() < 0.12) {
+    contour = [0, ...contour.slice(1).reverse()];
+  }
+  const rhythm = familiarTheme
+    ? familiarTheme.rhythmBeats.map((beat) =>
+        clamp(beat * (1.16 - arousal * 0.22), 0.5, 2.5),
+      )
+    : sampleClassicalRhythm(random, contour.length, mode, arousal);
   return {
     anchorDegree: random.pick([0, 0, 2, 4, 5] as const),
     contour,
     cursor: 0,
     cycle: 0,
     direction: random.next() < 0.22 ? -1 : 1,
+    familiar: Boolean(familiarTheme),
     mutations: 0,
     remainingBeats: 0,
     rhythmBeats: clonePattern(rhythm),
     sequenceDegree: 0,
+    sourceName: familiarTheme
+      ? `${familiarTheme.composer} · ${familiarTheme.name}`
+      : 'OpenScore Lieder corpus',
   };
 };
 

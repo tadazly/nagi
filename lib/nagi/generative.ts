@@ -19,9 +19,69 @@ export type WeatherProfile = {
 
 export type SeedSnapshot = {
   currentSeed: string;
+  emotion: EmotionName;
+  incomingEmotion: EmotionName | null;
   incomingSeed: string | null;
   profile: WeatherProfile;
   transition: number;
+};
+
+export type EmotionName =
+  | 'CALM'
+  | 'WARM'
+  | 'DREAMY'
+  | 'JOYFUL'
+  | 'UPLIFTING'
+  | 'ROMANTIC'
+  | 'NOSTALGIC'
+  | 'MELANCHOLIC'
+  | 'LONELY'
+  | 'MYSTERIOUS'
+  | 'TENSE'
+  | 'DARK';
+
+export type EmotionPreset = {
+  arousal: number;
+  brightness: number;
+  chordColor: number;
+  density: number;
+  dreaminess: number;
+  groove: number;
+  motifRate: number;
+  space: number;
+  tension: number;
+  valence: number;
+  warmth: number;
+};
+
+export const CORE_EMOTIONS: readonly EmotionName[] = [
+  'CALM',
+  'WARM',
+  'DREAMY',
+  'JOYFUL',
+  'UPLIFTING',
+  'ROMANTIC',
+  'NOSTALGIC',
+  'MELANCHOLIC',
+  'LONELY',
+  'MYSTERIOUS',
+  'TENSE',
+  'DARK',
+] as const;
+
+export const EMOTION_PRESETS: Readonly<Record<EmotionName, EmotionPreset>> = {
+  CALM: { arousal: 0.2, brightness: 0.52, chordColor: 0.24, density: 0.25, dreaminess: 0.34, groove: 0.055, motifRate: 0.32, space: 0.48, tension: 0.14, valence: 0.66, warmth: 0.56 },
+  WARM: { arousal: 0.34, brightness: 0.64, chordColor: 0.3, density: 0.4, dreaminess: 0.3, groove: 0.07, motifRate: 0.42, space: 0.3, tension: 0.17, valence: 0.78, warmth: 0.9 },
+  DREAMY: { arousal: 0.3, brightness: 0.6, chordColor: 0.5, density: 0.3, dreaminess: 0.94, groove: 0.045, motifRate: 0.34, space: 0.9, tension: 0.27, valence: 0.62, warmth: 0.53 },
+  JOYFUL: { arousal: 0.84, brightness: 0.88, chordColor: 0.3, density: 0.72, dreaminess: 0.22, groove: 0.145, motifRate: 0.82, space: 0.34, tension: 0.24, valence: 0.91, warmth: 0.66 },
+  UPLIFTING: { arousal: 0.76, brightness: 0.86, chordColor: 0.38, density: 0.68, dreaminess: 0.44, groove: 0.12, motifRate: 0.74, space: 0.6, tension: 0.31, valence: 0.84, warmth: 0.69 },
+  ROMANTIC: { arousal: 0.44, brightness: 0.68, chordColor: 0.56, density: 0.5, dreaminess: 0.54, groove: 0.07, motifRate: 0.5, space: 0.56, tension: 0.27, valence: 0.75, warmth: 0.9 },
+  NOSTALGIC: { arousal: 0.33, brightness: 0.43, chordColor: 0.58, density: 0.35, dreaminess: 0.54, groove: 0.06, motifRate: 0.4, space: 0.64, tension: 0.34, valence: 0.5, warmth: 0.76 },
+  MELANCHOLIC: { arousal: 0.25, brightness: 0.3, chordColor: 0.46, density: 0.29, dreaminess: 0.38, groove: 0.045, motifRate: 0.31, space: 0.62, tension: 0.43, valence: 0.25, warmth: 0.43 },
+  LONELY: { arousal: 0.16, brightness: 0.25, chordColor: 0.34, density: 0.13, dreaminess: 0.5, groove: 0.03, motifRate: 0.24, space: 0.96, tension: 0.35, valence: 0.3, warmth: 0.25 },
+  MYSTERIOUS: { arousal: 0.44, brightness: 0.36, chordColor: 0.68, density: 0.46, dreaminess: 0.8, groove: 0.075, motifRate: 0.48, space: 0.8, tension: 0.66, valence: 0.42, warmth: 0.33 },
+  TENSE: { arousal: 0.78, brightness: 0.48, chordColor: 0.72, density: 0.8, dreaminess: 0.24, groove: 0.145, motifRate: 0.82, space: 0.44, tension: 0.88, valence: 0.28, warmth: 0.27 },
+  DARK: { arousal: 0.4, brightness: 0.12, chordColor: 0.62, density: 0.56, dreaminess: 0.58, groove: 0.065, motifRate: 0.44, space: 0.7, tension: 0.73, valence: 0.18, warmth: 0.2 },
 };
 
 export type ModeDefinition = {
@@ -54,6 +114,19 @@ export type HarmonicScene = {
   tension: number;
   tonic: number;
   valence: number;
+};
+
+export type EmotionalFormStage = {
+  arousalDelta: number;
+  id: 'statement' | 'development' | 'intensification' | 'release' | 'return';
+  tensionDelta: number;
+  valenceDelta: number;
+};
+
+export type EmotionalFormPlan = {
+  emotionJourney: readonly EmotionName[];
+  scenesPerStage: number;
+  stages: readonly EmotionalFormStage[];
 };
 
 export type RhythmRole = 'lead' | 'counter';
@@ -380,26 +453,186 @@ export const chooseNextDegree = (
 ) => {
   const modeLength = MODES[scene.modeIndex].intervals.length;
   const currentFunction = harmonicFunctionForDegree(scene, currentDegree);
-  const cadenceWindow = smoothstep((phraseProgress - 0.68) / 0.32);
+  const normalizedPhrase = ((phraseProgress % 1) + 1) % 1;
+  const phraseFunctionWeight = (harmonicFunction: HarmonicFunction) => {
+    if (normalizedPhrase < 0.24) {
+      return harmonicFunction === 'tonic' ? 1.7 : harmonicFunction === 'color' ? 0.82 : 0.68;
+    }
+    if (normalizedPhrase < 0.58) {
+      return harmonicFunction === 'predominant'
+        ? 1.62
+        : harmonicFunction === 'color'
+          ? 1.08
+          : 0.78;
+    }
+    if (normalizedPhrase < 0.84) {
+      return harmonicFunction === 'dominant'
+        ? 1.9
+        : harmonicFunction === 'predominant'
+          ? 1.05
+          : 0.58;
+    }
+    return harmonicFunction === 'tonic'
+      ? 2.7
+      : harmonicFunction === 'dominant'
+        ? 0.92
+        : 0.42;
+  };
   const weights = Array.from({ length: modeLength }, (_, degree) => {
     const nextFunction = harmonicFunctionForDegree(scene, degree);
     let weight = FUNCTION_TRANSITIONS[currentFunction][nextFunction];
+    weight *= phraseFunctionWeight(nextFunction);
     weight *= 0.12 + degreeTriadComfort(scene, degree) * 0.88;
     const tensionDistance = Math.abs(degreeTension(degree) - scene.tension);
     weight *= 1.2 - tensionDistance * 0.62;
     if (degree === wrapDegree(currentDegree, modeLength)) weight *= 0.22;
     if (degree === 0) {
-      weight *= 1 + cadenceWindow * (1.7 + scene.cadenceBias * 1.6);
-    } else if (nextFunction === 'dominant') {
-      weight *= 1 + (1 - cadenceWindow) * scene.cadenceBias * 0.5;
+      weight *= 1 + smoothstep((normalizedPhrase - 0.82) / 0.18) * (1.8 + scene.cadenceBias * 1.8);
+    } else if (nextFunction === 'dominant' && normalizedPhrase >= 0.58) {
+      weight *= 1 + scene.cadenceBias * 1.1;
     }
+    if (currentFunction === 'dominant' && nextFunction === 'tonic') weight *= 2.15;
     if (degreeTension(degree) > 0.6) {
-      weight *= 0.12 + scene.tension * 0.32;
+      weight *= 0.08 + scene.tension * 0.24;
     }
-    if (nextFunction === 'color') weight *= 0.58;
+    if (nextFunction === 'color') weight *= 0.5;
     return Math.max(0.001, weight);
   });
   return weightedIndex(weights, random);
+};
+
+export const emotionalFormFromSeed = (seed: string): EmotionalFormPlan => {
+  const random = new SeededRandom(seedToNumber(seed) ^ 0x3c6ef372);
+  const valenceDirection = random.next() < 0.5 ? -1 : 1;
+  const intensity = random.between(0.78, 1.08);
+  const shapes: ReadonlyArray<ReadonlyArray<[number, number, number]>> = [
+    [
+      [-0.08, 0, -0.04],
+      [0.02, 0.02, 0.015],
+      [0.17, 0.055, 0.09],
+      [-0.035, 0.025, -0.015],
+      [-0.11, 0.01, -0.055],
+    ],
+    [
+      [-0.12, -0.015, -0.05],
+      [0.08, 0.02, 0.04],
+      [0.12, -0.035, 0.075],
+      [-0.02, 0.045, -0.01],
+      [-0.09, 0.02, -0.045],
+    ],
+    [
+      [-0.055, 0.025, -0.03],
+      [0.11, 0.04, 0.055],
+      [0.04, -0.02, 0.025],
+      [-0.095, -0.035, -0.04],
+      [-0.035, 0.015, -0.025],
+    ],
+  ];
+  const shape = shapes[Math.floor(random.next() * shapes.length)];
+  const ids: EmotionalFormStage['id'][] = [
+    'statement',
+    'development',
+    'intensification',
+    'release',
+    'return',
+  ];
+  const stages = shape.map(([arousal, valence, tension], index) => ({
+      arousalDelta: arousal * intensity,
+      id: ids[index],
+      tensionDelta: tension * intensity,
+      valenceDelta: valence * valenceDirection,
+    }));
+  const emotionJourney: EmotionName[] = [random.pick(CORE_EMOTIONS)];
+  for (let index = 1; index < stages.length; index += 1) {
+    const previous = EMOTION_PRESETS[emotionJourney[index - 1]];
+    const stage = stages[index];
+    const targetArousal = clamp(previous.arousal + stage.arousalDelta * 1.8);
+    const targetValence = clamp(previous.valence + stage.valenceDelta * 1.5);
+    const targetTension = clamp(previous.tension + stage.tensionDelta * 1.7);
+    const weights = CORE_EMOTIONS.map((emotion) => {
+      const preset = EMOTION_PRESETS[emotion];
+      const distance =
+        Math.abs(preset.arousal - targetArousal) * 1.15 +
+        Math.abs(preset.valence - targetValence) +
+        Math.abs(preset.tension - targetTension) * 0.82;
+      const stepDistance = Math.hypot(
+        preset.arousal - previous.arousal,
+        preset.valence - previous.valence,
+        preset.tension - previous.tension,
+      );
+      if (stepDistance > 0.78) return 0;
+      const continuity = Math.exp(-distance * 3.4);
+      return continuity * (emotion === emotionJourney[index - 1] ? 0.32 : 1);
+    });
+    emotionJourney.push(CORE_EMOTIONS[weightedIndex(weights, random)]);
+  }
+  return {
+    emotionJourney,
+    scenesPerStage: random.pick([1, 2, 2, 3] as const),
+    stages,
+  };
+};
+
+export const emotionalFormStageAt = (
+  form: EmotionalFormPlan,
+  sceneIndex: number,
+) => {
+  const stageIndex =
+    Math.floor(Math.max(0, sceneIndex) / Math.max(1, form.scenesPerStage)) %
+    form.stages.length;
+  return form.stages[stageIndex];
+};
+
+export const emotionalFormEmotionAt = (
+  form: EmotionalFormPlan,
+  sceneIndex: number,
+) => {
+  const stageIndex =
+    Math.floor(Math.max(0, sceneIndex) / Math.max(1, form.scenesPerStage)) %
+    form.emotionJourney.length;
+  return form.emotionJourney[stageIndex];
+};
+
+export const shapeSceneWithEmotionalForm = (
+  scene: HarmonicScene,
+  form: EmotionalFormPlan,
+  sceneIndex: number,
+): HarmonicScene => {
+  const stage = emotionalFormStageAt(form, sceneIndex);
+  const emotion = EMOTION_PRESETS[emotionalFormEmotionAt(form, sceneIndex)];
+  const arousal = clamp(
+    scene.arousal * 0.56 + emotion.arousal * 0.44 + stage.arousalDelta * 0.22,
+    0.08,
+    0.98,
+  );
+  const valence = clamp(
+    scene.valence * 0.54 + emotion.valence * 0.46 + stage.valenceDelta * 0.18,
+    0.15,
+    0.97,
+  );
+  const tension = clamp(
+    scene.tension * 0.48 + emotion.tension * 0.52 + stage.tensionDelta * 0.2,
+    0.08,
+    0.9,
+  );
+  return {
+    ...scene,
+    arousal,
+    chordColor: clamp(
+      scene.chordColor * 0.58 + emotion.chordColor * 0.42 + stage.tensionDelta * 0.2,
+      0.12,
+      0.78,
+    ),
+    groove: clamp(scene.groove * 0.58 + emotion.groove * 0.42, 0.025, 0.17),
+    motifRate: clamp(
+      scene.motifRate * 0.56 + emotion.motifRate * 0.44 + stage.arousalDelta * 0.2,
+      0.2,
+      0.94,
+    ),
+    tempo: tempoFromArousal(arousal, valence),
+    tension,
+    valence,
+  };
 };
 
 export const chordPitchClasses = (
@@ -430,63 +663,197 @@ export const chordRootMidi = (scene: HarmonicScene, degree: number) => {
   return midi;
 };
 
-const voicingCost = (notes: readonly number[], previous: readonly number[]) => {
+const voicingCost = (
+  notes: readonly number[],
+  previous: readonly number[],
+  chordClasses: readonly number[],
+  scene: HarmonicScene,
+) => {
   const center = notes.reduce((sum, note) => sum + note, 0) / notes.length;
-  let cost = Math.abs(center - 69) * 0.1;
+  let cost = Math.abs(center - 61) * 0.08;
   for (let index = 1; index < notes.length; index += 1) {
     const gap = notes[index] - notes[index - 1];
-    if (gap < 5) cost += (5 - gap) * 4.2;
-    if (notes[index - 1] < 62 && gap < 7) cost += (7 - gap) * 3.4;
-    if (gap > 12) cost += (gap - 12) * 0.18;
+    const minimumGap = index === 1 ? 5 : 3;
+    if (gap < minimumGap) cost += (minimumGap - gap) * 5.2;
+    if (index > 1 && gap > 12) cost += (gap - 12) * 0.48;
+    if (index === 1 && gap > 19) cost += (gap - 19) * 0.26;
     cost += sensoryRoughness(notes[index - 1], notes[index]) * 2.6;
   }
-  if (notes[notes.length - 1] - notes[0] > 27) cost += 2.8;
-  if (previous.length === 0) return cost;
-  const symmetricMotion =
-    notes.reduce(
-      (sum, note) => sum + Math.min(...previous.map((old) => Math.abs(note - old))),
-      0,
-    ) +
-    previous.reduce(
-      (sum, old) => sum + Math.min(...notes.map((note) => Math.abs(note - old))),
+  if (notes[notes.length - 1] - notes[0] > 39) cost += 3.2;
+
+  const representedClasses = new Set(notes.map(pitchClass));
+  chordClasses.slice(0, Math.min(3, notes.length)).forEach((noteClass, index) => {
+    if (!representedClasses.has(noteClass)) cost += index === 2 ? 1.2 : 4.4;
+  });
+
+  if (previous.length === notes.length) {
+    for (let index = 0; index < notes.length; index += 1) {
+      const motion = notes[index] - previous[index];
+      cost += Math.abs(motion) * (index === 0 ? 0.18 : 0.34);
+      if (Math.abs(motion) > 7) cost += (Math.abs(motion) - 7) * 1.4;
+    }
+    for (let low = 0; low < notes.length; low += 1) {
+      for (let high = low + 1; high < notes.length; high += 1) {
+        const previousInterval = pitchClass(previous[high] - previous[low]);
+        const nextInterval = pitchClass(notes[high] - notes[low]);
+        const lowMotion = notes[low] - previous[low];
+        const highMotion = notes[high] - previous[high];
+        if (
+          (previousInterval === 0 || previousInterval === 7) &&
+          nextInterval === previousInterval &&
+          lowMotion !== 0 &&
+          Math.sign(lowMotion) === Math.sign(highMotion)
+        ) {
+          cost += 11;
+        }
+      }
+    }
+    const leadingTone = pitchClass(scene.tonic + 11);
+    previous.forEach((note, index) => {
+      if (pitchClass(note) === leadingTone && pitchClass(notes[index]) !== pitchClass(scene.tonic)) {
+        cost += 4.6;
+      }
+    });
+  } else if (previous.length > 0) {
+    cost += notes.reduce(
+      (sum, note) => sum + Math.min(...previous.map((old) => Math.abs(note - old))) * 0.26,
       0,
     );
-  cost += symmetricMotion * 0.26;
-  cost -= notes.filter((note) => previous.includes(note)).length * 1.8;
-  cost += Math.max(0, Math.abs(notes.at(-1)! - previous.at(-1)!) - 7) * 0.65;
+  }
   return cost;
+};
+
+export const chooseHarmonyVoiceCount = (
+  scene: HarmonicScene,
+  density: number,
+  phraseProgress: number,
+  previousCount: number,
+  random: SeededRandom,
+) => {
+  const phraseArc = Math.sin(clamp(phraseProgress) * Math.PI);
+  const energy = scene.arousal * 0.4 + clamp(density) * 0.35 + phraseArc * 0.18 + scene.tension * 0.07;
+  const target = energy > 0.88
+    ? 7
+    : energy > 0.76
+      ? 6
+      : energy > 0.63
+        ? 5
+        : energy > 0.48
+          ? 4
+          : energy > 0.31
+            ? 3
+            : energy > 0.18
+              ? 2
+              : 1;
+  const softened = random.next() < 0.22 ? target + random.pick([-1, 1] as const) : target;
+  const bounded = Math.round(clamp(softened, 1, 7));
+  if (previousCount < 1 || previousCount > 7) return bounded;
+  return Math.round(clamp(bounded, previousCount - 1, previousCount + 1));
 };
 
 export const voiceLeadChord = (
   scene: HarmonicScene,
   degree: number,
   previous: readonly number[] = [],
+  voiceCount = 3,
 ) => {
   const classes = chordPitchClasses(scene, degree);
-  const candidates = classes.map((noteClass) => {
+  const count = Math.round(clamp(voiceCount, 1, 7));
+  const ranges = Array.from({ length: count }, (_, voiceIndex) => {
+    if (voiceIndex === 0) return [38, 55] as const;
+    const position = count <= 2 ? 0.72 : (voiceIndex - 1) / Math.max(1, count - 2);
+    const low = Math.round(47 + position * 20);
+    return [low, Math.min(86, low + 15)] as const;
+  });
+  const rootClass = classes[0];
+  const candidates = ranges.map(([low, high], voiceIndex) => {
     const values: number[] = [];
-    for (let midi = 58; midi <= 82; midi += 1) {
-      if (pitchClass(midi) === noteClass) values.push(midi);
+    for (let midi = low; midi <= high; midi += 1) {
+      if (voiceIndex === 0 ? pitchClass(midi) === rootClass : classes.includes(pitchClass(midi))) {
+        values.push(midi);
+      }
     }
-    return values;
+    const target = previous.length === count && previous[voiceIndex] !== undefined
+      ? previous[voiceIndex]
+      : voiceIndex === 0
+        ? 46
+        : 52 + ((voiceIndex - 1) / Math.max(1, count - 2)) * 28;
+    return values.sort((a, b) => Math.abs(a - target) - Math.abs(b - target)).slice(0, 3);
   });
   let best: number[] | null = null;
   let bestCost = Infinity;
   const visit = (index: number, chosen: number[]) => {
     if (index >= candidates.length) {
-      const notes = [...chosen].sort((a, b) => a - b);
-      if (new Set(notes).size !== notes.length) return;
-      const cost = voicingCost(notes, previous);
+      const notes = [...chosen];
+      const cost = voicingCost(notes, previous, classes, scene);
       if (cost < bestCost) {
         bestCost = cost;
         best = notes;
       }
       return;
     }
-    for (const midi of candidates[index]) visit(index + 1, [...chosen, midi]);
+    for (const midi of candidates[index]) {
+      if (chosen.length > 0 && midi <= chosen.at(-1)!) continue;
+      if (
+        chosen.length > 0 &&
+        midi - chosen.at(-1)! < (index === 1 ? 5 : 2)
+      ) continue;
+      visit(index + 1, [...chosen, midi]);
+    }
   };
   visit(0, []);
-  return best ?? classes.map((noteClass, index) => 52 + noteClass + index * 3);
+  if (best) return best;
+  const fallback = [chordRootMidi(scene, degree)];
+  for (let index = 1; index < count; index += 1) {
+    const targetClass = classes[index % classes.length];
+    let midi = 48 + index * 5;
+    while (pitchClass(midi) !== targetClass) midi += 1;
+    while (midi <= fallback.at(-1)! + (index === 1 ? 4 : 1)) midi += 12;
+    fallback.push(Math.min(88, midi));
+  }
+  return fallback;
+};
+
+export const emotionNameForState = (
+  arousal: number,
+  valence: number,
+  tension = 0.5,
+  features: Partial<Pick<EmotionPreset, 'brightness' | 'density' | 'dreaminess' | 'space' | 'warmth'>> = {},
+): EmotionName => {
+  const values = {
+    arousal: clamp(arousal),
+    brightness: features.brightness ?? clamp(valence * 0.72 + arousal * 0.18),
+    density: features.density ?? clamp(0.2 + arousal * 0.68),
+    dreaminess: features.dreaminess ?? 0.5,
+    space: features.space ?? 0.5,
+    tension: clamp(tension),
+    valence: clamp(valence),
+    warmth: features.warmth ?? clamp(valence * 0.7 + 0.12),
+  };
+  let best = CORE_EMOTIONS[0];
+  let bestDistance = Infinity;
+  for (const emotion of CORE_EMOTIONS) {
+    const preset = EMOTION_PRESETS[emotion];
+    const distance =
+      (values.arousal - preset.arousal) ** 2 * 1.2 +
+      (values.valence - preset.valence) ** 2 * 1.1 +
+      (values.tension - preset.tension) ** 2 +
+      (values.brightness - preset.brightness) ** 2 * 0.58 +
+      (values.density - preset.density) ** 2 * 0.42 +
+      (values.dreaminess - preset.dreaminess) ** 2 * 0.52 +
+      (values.space - preset.space) ** 2 * 0.48 +
+      (values.warmth - preset.warmth) ** 2 * 0.52;
+    if (distance < bestDistance) {
+      best = emotion;
+      bestDistance = distance;
+    }
+  }
+  return best;
+};
+
+export const initialEmotionFromSeed = (seed: string) => {
+  const form = emotionalFormFromSeed(seed);
+  return form.emotionJourney[0];
 };
 
 const scenePitchClasses = (scene: HarmonicScene) =>

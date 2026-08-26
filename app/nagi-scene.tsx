@@ -10,13 +10,22 @@ import {
   Vignette,
 } from '@react-three/postprocessing';
 import { BlendFunction } from 'postprocessing';
-import { type RefObject, useMemo, useRef, useState } from 'react';
+import { type RefObject, useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import {
   type AudioBands,
   type NagiAudioEngine,
 } from '../lib/nagi/audio-engine';
-import { seedToNumber, type SeedSnapshot } from '../lib/nagi/generative';
+import {
+  CORE_EMOTIONS,
+  seedToNumber,
+  type EmotionName,
+  type SeedSnapshot,
+} from '../lib/nagi/generative';
+import {
+  EMOTION_COLOR_PALETTES,
+  EMOTION_SHADER_TEMPLATES,
+} from '../lib/nagi/visual-presets';
 
 export type NagiPointerField = {
   down: number;
@@ -34,12 +43,16 @@ export type NagiRendererDiagnostics = {
   antialias: boolean;
   barPhase: number;
   beatPhase: number;
+  contextLosses: number;
   drawCalls: number;
   fps: number;
   frames: number;
+  maxFrameGapMs: number;
   pointerEnergy: number;
   pulse: number;
   quality: number;
+  styleName: string;
+  styleVariant: number;
   webgl: boolean;
 };
 
@@ -69,6 +82,13 @@ uniform float uTime;
 uniform float uSeed;
 uniform vec2 uEmotion;
 uniform vec3 uPointer;
+uniform vec3 uColorA;
+uniform vec3 uColorB;
+uniform vec3 uColorC;
+uniform vec4 uPatternA;
+uniform vec4 uPatternB;
+uniform vec4 uPatternC;
+uniform vec4 uPatternParams;
 uniform vec4 uTransport;
 varying vec3 vDirection;
 
@@ -106,8 +126,9 @@ void main() {
   vec3 d = normalize(vDirection);
   float arousal = uEmotion.x;
   float valence = uEmotion.y;
-  float slowTime = uTime * mix(0.018, 0.075, arousal);
-  float mist = fbm(d * mix(2.2, 4.8, arousal) + vec3(slowTime, -slowTime * 0.7, uSeed * 8.0));
+  float slowTime = uTime * mix(0.018, 0.075, arousal) * uPatternParams.y;
+  vec3 q = d * uPatternParams.x;
+  float mist = fbm(q * mix(2.2, 4.8, arousal) + vec3(slowTime, -slowTime * 0.7, uSeed * 8.0));
   float tide = 0.5 + 0.5 * sin(d.y * 5.0 + mist * 3.2 - slowTime * 3.0);
   float longitude = atan(d.z, d.x);
   float auroraWave = 0.5 + 0.5 * sin(
@@ -122,29 +143,35 @@ void main() {
     abs(sin((abs(d.x) + abs(d.y * 1.3) + abs(d.z * 0.8)) * 21.0 + mist * 3.4)),
     13.0
   );
-  float calmWeight = 1.0 - smoothstep(0.2, 0.62, arousal);
-  float crystalWeight = smoothstep(0.56, 0.9, arousal) * (0.52 + (1.0 - valence) * 0.48);
-  float auroraWeight = clamp(1.0 - calmWeight * 0.7 - crystalWeight * 0.45, 0.0, 1.0);
-
-  vec3 calmA = mix(vec3(0.008, 0.018, 0.04), vec3(0.018, 0.052, 0.07), valence);
-  vec3 calmB = mix(vec3(0.06, 0.035, 0.11), vec3(0.025, 0.13, 0.13), valence);
-  vec3 auroraA = mix(vec3(0.16, 0.035, 0.25), vec3(0.02, 0.24, 0.2), valence);
-  vec3 auroraB = mix(vec3(0.18, 0.12, 0.34), vec3(0.38, 0.22, 0.08), valence);
-  vec3 crystalColor = mix(vec3(0.19, 0.06, 0.32), vec3(0.11, 0.3, 0.34), valence);
-
-  vec3 calm = mix(calmA, calmB, tide * 0.65 + mist * 0.25);
-  vec3 veil = mix(auroraA, auroraB, mist) * (0.28 + aurora * 1.08 + mist * 0.14);
-  vec3 facets = crystalColor * (0.1 + crystal * 0.98 + mist * 0.16);
-  vec3 color = calm * calmWeight + veil * auroraWeight + facets * crystalWeight;
-  float beatGlow = uTransport.x * mix(0.012, 0.045, arousal);
-  float barWave = 0.5 + 0.5 * cos(uTransport.z * 6.2831853);
-  color += mix(vec3(0.025, 0.07, 0.09), vec3(0.11, 0.075, 0.025), valence)
-    * beatGlow * (0.72 + barWave * 0.28);
+  float halo = pow(max(0.0, 1.0 - abs(length(d.xy) - 0.72 - mist * 0.12)), 7.0);
+  float lagoon = 0.5 + 0.5 * sin((d.x + d.z) * 8.0 + mist * 4.0 - slowTime * 2.0);
+  float rays = pow(0.5 + 0.5 * sin(longitude * 7.0 + mist * 2.0 + slowTime), 8.0);
+  float bloom = pow(max(0.0, sin(longitude * 3.0 + d.y * 5.0 + slowTime * 1.6)), 4.0);
+  float storm = fbm(d * 8.0 + vec3(-slowTime * 2.0, slowTime, uSeed * 15.0));
+  float lattice = pow(abs(sin((d.x - d.z) * 28.0 + storm * 5.0)), 11.0);
+  float ribbon = pow(0.5 + 0.5 * sin(longitude * 5.0 + d.y * 9.0 + mist * 3.0 + slowTime * 2.0), 5.0);
+  float vortex = 0.5 + 0.5 * sin(longitude * 4.0 + length(d.xy) * 13.0 - slowTime * 1.4 + mist * 4.0);
+  float sparkleCells = pow(hash31(floor((d + slowTime * 0.035) * 82.0 + uSeed * 19.0)), 22.0);
+  vec4 patternsA = vec4(mist * 0.58 + tide * 0.42, halo, lagoon, aurora);
+  vec4 patternsB = vec4(rays, bloom, crystal, storm);
+  vec4 patternsC = vec4(lattice, ribbon, vortex, sparkleCells);
+  float field = dot(uPatternA, patternsA) + dot(uPatternB, patternsB) + dot(uPatternC, patternsC);
+  field = smoothstep(0.08, max(0.34, 1.08 - uPatternParams.z * 0.38), field);
+  vec3 color = mix(uColorA, uColorB, clamp(mist * 0.32 + field * 0.68, 0.0, 1.0));
+  color *= 0.48 + field * 0.58 + mist * 0.12;
+  color += uColorC * field * (0.08 + valence * 0.13);
+  float starNoise = hash31(floor(d * 180.0 + uSeed * 37.0));
+  float stars = pow(starNoise, 62.0);
+  float twinkle = 0.5 + 0.5 * sin(uTransport.y * 6.2831853 + starNoise * 21.0);
+  float flowingLight = 0.5 + 0.5 * sin(
+    longitude * 3.0 + mist * 4.0 + uTransport.z * 6.2831853
+  );
+  color += uColorC * stars * (0.006 + twinkle * 0.018 + uTransport.x * 0.006) * uPatternParams.w;
+  color += uColorB * flowingLight * (0.005 + valence * 0.006);
   float pointerGlow = pow(max(dot(d, normalize(vec3(uPointer.xy, 0.7))), 0.0), 18.0);
-  color += mix(vec3(0.05, 0.12, 0.18), vec3(0.18, 0.12, 0.07), valence)
-    * pointerGlow * uPointer.z * 0.34;
+  color += uColorC * pointerGlow * uPointer.z * 0.24;
   color *= 0.7 + max(d.y, -0.25) * 0.12;
-  gl_FragColor = vec4(max(color, 0.0), 1.0);
+  gl_FragColor = vec4(max(color, vec3(0.002, 0.003, 0.007)), 1.0);
 }
 `;
 
@@ -152,9 +179,7 @@ const CORE_VERTEX_SHADER = `
 uniform float uTime;
 uniform float uSeed;
 uniform float uShape;
-uniform vec4 uAudio;
 uniform vec4 uPointer;
-uniform vec4 uTransport;
 uniform vec2 uEmotion;
 varying vec3 vNormalWorld;
 varying vec3 vPosition;
@@ -188,12 +213,11 @@ void main() {
   float fine = sin(
     (position.x + position.y - position.z) * mix(9.0, 17.0, arousal) + uTime * 0.24
   ) * mix(0.018, 0.036, arousal);
-  float interaction = max(uAudio.w, uPointer.z);
+  float interaction = uPointer.z;
   float cursorFacing = max(dot(normalize(position.xy + vec2(0.0001)), normalize(uPointer.xy + vec2(0.0001))), 0.0);
   float displacement = field * mix(0.1, 0.3, uShape) * mix(0.72, 1.2, arousal)
     + fine * (0.45 + uShape);
-  displacement += uAudio.x * 0.08 + uTransport.x * mix(0.022, 0.052, arousal)
-    + interaction * cursorFacing * 0.055;
+  displacement += interaction * cursorFacing * 0.055;
   transformed += vec3(
     sin(position.y * 2.7 + uTime * 0.13),
     sin(position.z * 3.1 - uTime * 0.11),
@@ -216,8 +240,6 @@ precision highp float;
 uniform float uTime;
 uniform float uSeed;
 uniform float uSparkle;
-uniform vec4 uAudio;
-uniform vec4 uTransport;
 uniform float uTension;
 uniform vec2 uEmotion;
 uniform vec3 uColorA;
@@ -240,19 +262,15 @@ void main() {
     + uTime * (0.14 + uEmotion.x * 0.12) + uSeed * 23.0
   );
   float caustic = pow(band, 7.0) * (0.08 + uSparkle * 0.24);
-  float phraseWave = sin(uTransport.w * 6.2831853);
-  float barWave = sin(uTransport.z * 6.2831853);
+  float slowInterference = sin(uTime * 0.07 + uSeed * 11.0);
   float interference = 0.5 + 0.5 * sin(
-    (vPosition.x - vPosition.z) * 9.0 - uTime * 0.12 + phraseWave * 0.24 + barWave * 0.08
+    (vPosition.x - vPosition.z) * 9.0 - uTime * 0.12 + slowInterference * 0.18
   );
   vec3 color = mix(uColorA, uColorB, diffuse * 0.64 + opposite * 0.2 + band * 0.15);
   color = mix(color, uColorC, fresnel * (0.58 + uSparkle * 0.25));
   color += uColorC * (caustic + pow(max(diffuse, 0.0), 10.0) * 0.4);
   color += mix(uColorA, uColorC, interference) * vDisplacement * 0.45;
-  color += uColorC * (
-    uAudio.y * 0.11 + uAudio.z * fresnel * 0.22
-    + uTransport.x * mix(0.02, 0.065, uEmotion.x)
-  );
+  color += uColorC * (uEmotion.y * 0.025 + uEmotion.x * fresnel * 0.04);
   color = mix(color, color * vec3(1.04, 0.98, 1.08), uTension * 0.08);
   color = mix(color, color * mix(vec3(0.9, 0.82, 1.18), vec3(1.12, 1.04, 0.82), uEmotion.y), uEmotion.x * 0.16);
   float alpha = 0.9 + fresnel * 0.1;
@@ -262,11 +280,10 @@ void main() {
 
 const SHELL_VERTEX_SHADER = `
 uniform float uTime;
-uniform vec4 uAudio;
 varying vec3 vNormalWorld;
 varying vec3 vWorldPosition;
 void main() {
-  vec3 transformed = position + normal * sin(position.y * 6.0 + uTime * 0.22) * (0.018 + uAudio.x * 0.025);
+  vec3 transformed = position + normal * sin(position.y * 6.0 + uTime * 0.22) * 0.022;
   vec4 world = modelMatrix * vec4(transformed, 1.0);
   vNormalWorld = normalize(mat3(modelMatrix) * normal);
   vWorldPosition = world.xyz;
@@ -287,22 +304,132 @@ void main() {
 }
 `;
 
-function palette(harmony: number, brightness: number) {
-  const coolHue = THREE.MathUtils.lerp(0.49, 0.66, harmony);
-  const warmHue = THREE.MathUtils.lerp(0.53, 0.84, harmony);
+type PaletteSet = {
+  a: THREE.Color;
+  b: THREE.Color;
+  c: THREE.Color;
+};
+
+const emotionColors = Object.fromEntries(
+  (Object.entries(EMOTION_COLOR_PALETTES) as Array<
+    [EmotionName, readonly [string, string, string]]
+  >).map(([emotion, colors]) => [
+    emotion,
+    {
+      a: new THREE.Color(colors[0]),
+      b: new THREE.Color(colors[1]),
+      c: new THREE.Color(colors[2]),
+    },
+  ]),
+) as Record<EmotionName, PaletteSet>;
+
+function setEmotionPalette(
+  target: PaletteSet,
+  emotion: EmotionName,
+  incomingEmotion: EmotionName | null,
+  transition: number,
+  harmony: number,
+  brightness: number,
+  arousal: number,
+  valence: number,
+  seed: number,
+) {
+  const source = emotionColors[emotion];
+  const incoming = incomingEmotion ? emotionColors[incomingEmotion] : source;
+  const mix = incomingEmotion ? THREE.MathUtils.smoothstep(transition, 0, 1) : 0;
+  target.a.copy(source.a).lerp(incoming.a, mix);
+  target.b.copy(source.b).lerp(incoming.b, mix);
+  target.c.copy(source.c).lerp(incoming.c, mix);
+  const harmonicShift = (harmony - 0.5) * 0.018;
+  const seedShift = Math.sin(seed * 91.73) * 0.008;
+  const positive = THREE.MathUtils.smoothstep(valence, 0.38, 0.84);
+  target.a.offsetHSL(harmonicShift + seedShift, arousal * 0.015, brightness * 0.006);
+  target.b.offsetHSL(-harmonicShift * 0.5 - seedShift * 0.35, arousal * 0.02, brightness * 0.012);
+  target.c.offsetHSL(seedShift * 0.25, arousal * 0.018, brightness * 0.025 + positive * 0.012);
+  return target;
+}
+
+function palette(
+  emotion: EmotionName = 'CALM',
+  harmony = 0.5,
+  brightness = 0.5,
+  arousal = 0.28,
+  valence = 0.52,
+  seed = 0.5,
+): PaletteSet {
+  return setEmotionPalette(
+    { a: new THREE.Color(), b: new THREE.Color(), c: new THREE.Color() },
+    emotion,
+    null,
+    0,
+    harmony,
+    brightness,
+    arousal,
+    valence,
+    seed,
+  );
+}
+
+function shaderVariantIndex(seed: number) {
+  return Math.floor(Math.abs(Math.sin(seed * 43758.5453)) * 3) % 3;
+}
+
+function shaderState(emotion: EmotionName, seed: number) {
+  const variants = EMOTION_SHADER_TEMPLATES[emotion];
+  const variant = shaderVariantIndex(seed);
+  const template = variants[variant];
+  const weights = template.weights;
   return {
-    a: new THREE.Color().setHSL(coolHue, 0.64, 0.035 + brightness * 0.025),
-    b: new THREE.Color().setHSL(warmHue, 0.58, 0.15 + brightness * 0.065),
-    c: new THREE.Color().setHSL(warmHue + 0.04, 0.38, 0.42 + brightness * 0.085),
+    a: new THREE.Vector4(weights[0], weights[1], weights[2], weights[3]),
+    b: new THREE.Vector4(weights[4], weights[5], weights[6], weights[7]),
+    c: new THREE.Vector4(weights[8], weights[9], weights[10], weights[11]),
+    label: template.label,
+    params: new THREE.Vector4(...template.params),
+    variant,
   };
 }
 
 function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
   const materialRef = useRef<THREE.ShaderMaterial>(null);
   const seedValue = seedToNumber(seedSnapshot.currentSeed) / 4294967295;
+  const colorTarget = useMemo(() => palette(), []);
+  const blendedStyles = useMemo(
+    () => ({
+      a: new THREE.Vector4(),
+      b: new THREE.Vector4(),
+      c: new THREE.Vector4(),
+      params: new THREE.Vector4(),
+    }),
+    [],
+  );
+  const styleTargets = useMemo(() => {
+    const current = seedToNumber(seedSnapshot.currentSeed) / 4294967295;
+    const incoming = seedSnapshot.incomingSeed
+      ? seedToNumber(seedSnapshot.incomingSeed) / 4294967295
+      : current;
+    return {
+      current: shaderState(seedSnapshot.emotion, current),
+      incoming: shaderState(
+        seedSnapshot.incomingEmotion ?? seedSnapshot.emotion,
+        incoming,
+      ),
+    };
+  }, [
+    seedSnapshot.currentSeed,
+    seedSnapshot.emotion,
+    seedSnapshot.incomingEmotion,
+    seedSnapshot.incomingSeed,
+  ]);
   const uniforms = useMemo(
     () => ({
+      uColorA: { value: new THREE.Color('#071326') },
+      uColorB: { value: new THREE.Color('#183a56') },
+      uColorC: { value: new THREE.Color('#9fb9d2') },
       uEmotion: { value: new THREE.Vector2(0.2, 0.5) },
+      uPatternA: { value: new THREE.Vector4(1, 0, 0, 0) },
+      uPatternB: { value: new THREE.Vector4() },
+      uPatternC: { value: new THREE.Vector4() },
+      uPatternParams: { value: new THREE.Vector4(1, 0.6, 0.75, 0.3) },
       uPointer: { value: new THREE.Vector3() },
       uSeed: { value: 0 },
       uTime: { value: 0 },
@@ -316,16 +443,17 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
     if (!material) return;
     const audio = audioRef.current;
     const pointer = pointerRef.current;
+    const targetSeed = seedSnapshot.incomingSeed
+      ? THREE.MathUtils.lerp(
+          seedToNumber(seedSnapshot.currentSeed) / 4294967295,
+          seedToNumber(seedSnapshot.incomingSeed) / 4294967295,
+          seedSnapshot.transition,
+        )
+      : seedValue;
     material.uniforms.uTime.value = state.clock.elapsedTime;
     material.uniforms.uSeed.value = THREE.MathUtils.lerp(
       material.uniforms.uSeed.value,
-      seedSnapshot.incomingSeed
-        ? THREE.MathUtils.lerp(
-            seedToNumber(seedSnapshot.currentSeed) / 4294967295,
-            seedToNumber(seedSnapshot.incomingSeed) / 4294967295,
-            seedSnapshot.transition,
-          )
-        : seedValue,
+      targetSeed,
       1 - Math.exp(-delta * 0.55),
     );
     material.uniforms.uEmotion.value.x = THREE.MathUtils.lerp(
@@ -343,6 +471,32 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
       1 - pointer.y * 2,
       pointer.targetEnergy,
     );
+    setEmotionPalette(
+      colorTarget,
+      seedSnapshot.emotion,
+      seedSnapshot.incomingEmotion,
+      seedSnapshot.transition,
+      seedSnapshot.profile.harmonicHue,
+      seedSnapshot.profile.brightness,
+      audio.arousal,
+      audio.valence,
+      targetSeed,
+    );
+    material.uniforms.uColorA.value.lerp(colorTarget.a, 1 - Math.exp(-delta * 0.55));
+    material.uniforms.uColorB.value.lerp(colorTarget.b, 1 - Math.exp(-delta * 0.55));
+    material.uniforms.uColorC.value.lerp(colorTarget.c, 1 - Math.exp(-delta * 0.55));
+    const styleMix = seedSnapshot.incomingSeed ? seedSnapshot.transition : 0;
+    const styleEase = 1 - Math.exp(-delta * 0.8);
+    blendedStyles.a.copy(styleTargets.current.a).lerp(styleTargets.incoming.a, styleMix);
+    blendedStyles.b.copy(styleTargets.current.b).lerp(styleTargets.incoming.b, styleMix);
+    blendedStyles.c.copy(styleTargets.current.c).lerp(styleTargets.incoming.c, styleMix);
+    blendedStyles.params
+      .copy(styleTargets.current.params)
+      .lerp(styleTargets.incoming.params, styleMix);
+    material.uniforms.uPatternA.value.lerp(blendedStyles.a, styleEase);
+    material.uniforms.uPatternB.value.lerp(blendedStyles.b, styleEase);
+    material.uniforms.uPatternC.value.lerp(blendedStyles.c, styleEase);
+    material.uniforms.uPatternParams.value.lerp(blendedStyles.params, styleEase);
     material.uniforms.uTransport.value.set(
       audio.pulse,
       audio.beatPhase,
@@ -373,13 +527,9 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
   const coreMaterialRef = useRef<THREE.ShaderMaterial>(null);
   const shellMaterialRef = useRef<THREE.ShaderMaterial>(null);
   const seedValue = seedToNumber(seedSnapshot.currentSeed) / 4294967295;
-  const colors = useMemo(
-    () => palette(seedSnapshot.profile.harmonicHue, seedSnapshot.profile.brightness),
-    [seedSnapshot.profile.brightness, seedSnapshot.profile.harmonicHue],
-  );
+  const colors = useMemo(() => palette(), []);
   const coreUniforms = useMemo(
     () => ({
-      uAudio: { value: new THREE.Vector4() },
       uColorA: { value: new THREE.Color('#102b3a') },
       uColorB: { value: new THREE.Color('#75608b') },
       uColorC: { value: new THREE.Color('#d4dbe8') },
@@ -390,13 +540,11 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
       uSparkle: { value: 0.5 },
       uTension: { value: 0 },
       uTime: { value: 0 },
-      uTransport: { value: new THREE.Vector4() },
     }),
     [],
   );
   const shellUniforms = useMemo(
     () => ({
-      uAudio: { value: new THREE.Vector4() },
       uColor: { value: new THREE.Color('#d4dbe8') },
       uOpacity: { value: 0.16 },
       uTime: { value: 0 },
@@ -435,14 +583,7 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
       seedSnapshot.profile.sparkle,
       1 - Math.exp(-delta * 0.8),
     );
-    material.uniforms.uAudio.value.set(audio.bass, audio.mid, audio.treble, audio.interaction);
     material.uniforms.uEmotion.value.set(audio.arousal, audio.valence);
-    material.uniforms.uTransport.value.set(
-      audio.pulse,
-      audio.beatPhase,
-      audio.barPhase,
-      audio.phrase,
-    );
     material.uniforms.uTension.value = audio.tension;
     material.uniforms.uPointer.value.set(
       pointer.x * 2 - 1,
@@ -450,25 +591,35 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
       pointer.targetEnergy,
       pointer.down,
     );
+    setEmotionPalette(
+      colors,
+      seedSnapshot.emotion,
+      seedSnapshot.incomingEmotion,
+      seedSnapshot.transition,
+      seedSnapshot.profile.harmonicHue,
+      seedSnapshot.profile.brightness,
+      audio.arousal,
+      audio.valence,
+      targetSeed,
+    );
     material.uniforms.uColorA.value.lerp(colors.a, 1 - Math.exp(-delta * 0.7));
     material.uniforms.uColorB.value.lerp(colors.b, 1 - Math.exp(-delta * 0.7));
     material.uniforms.uColorC.value.lerp(colors.c, 1 - Math.exp(-delta * 0.7));
 
     shellMaterial.uniforms.uTime.value = state.clock.elapsedTime;
-    shellMaterial.uniforms.uAudio.value.copy(material.uniforms.uAudio.value);
     shellMaterial.uniforms.uColor.value.lerp(colors.c, 1 - Math.exp(-delta * 0.7));
     shellMaterial.uniforms.uOpacity.value = 0.12 + seedSnapshot.profile.depth * 0.12;
 
     const shape = seedSnapshot.profile.shape;
     const targetScale = new THREE.Vector3(
-      0.92 + shape * 0.14 + audio.arousal * 0.13 + audio.pulse * 0.018,
-      1.08 - shape * 0.1 - audio.arousal * 0.08 + audio.pulse * 0.014,
-      0.9 + seedSnapshot.profile.depth * 0.1 + audio.valence * 0.08 + audio.pulse * 0.02,
+      0.92 + shape * 0.14 + audio.arousal * 0.13,
+      1.08 - shape * 0.1 - audio.arousal * 0.08,
+      0.9 + seedSnapshot.profile.depth * 0.1 + audio.valence * 0.08,
     );
     core.scale.lerp(targetScale, 1 - Math.exp(-delta * 0.55));
     shell.scale
       .copy(core.scale)
-      .multiplyScalar(1.035 + audio.bass * 0.035 + audio.pulse * 0.018);
+      .multiplyScalar(1.045);
     core.rotation.y += delta * (0.035 + seedSnapshot.profile.motion * 0.05);
     core.rotation.x = THREE.MathUtils.lerp(core.rotation.x, (pointer.y - 0.5) * 0.16, 0.025);
     core.rotation.z = THREE.MathUtils.lerp(core.rotation.z, (pointer.x - 0.5) * -0.12, 0.025);
@@ -508,8 +659,21 @@ function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps)
   const knotRef = useRef<THREE.Mesh>(null);
   const satellitesRef = useRef<THREE.Group>(null);
   const color = useMemo(
-    () => palette(seedSnapshot.profile.harmonicHue, seedSnapshot.profile.brightness).c,
-    [seedSnapshot.profile.brightness, seedSnapshot.profile.harmonicHue],
+    () =>
+      palette(
+        seedSnapshot.emotion,
+        seedSnapshot.profile.harmonicHue,
+        seedSnapshot.profile.brightness,
+        0.34,
+        0.56,
+        seedToNumber(seedSnapshot.currentSeed) / 4294967295,
+      ).c,
+    [
+      seedSnapshot.currentSeed,
+      seedSnapshot.emotion,
+      seedSnapshot.profile.brightness,
+      seedSnapshot.profile.harmonicHue,
+    ],
   );
 
   useFrame((state, delta) => {
@@ -525,17 +689,18 @@ function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps)
       0.025,
     );
     knotRef.current.rotation.y -=
-      delta * (0.028 + audio.mid * 0.08 + audio.arousal * 0.09);
+      delta * (0.028 + seedSnapshot.profile.flow * 0.05 + audio.arousal * 0.09);
     knotRef.current.rotation.z += delta * 0.026;
     satellitesRef.current.rotation.y += delta * (0.06 + seedSnapshot.profile.motion * 0.09);
     satellitesRef.current.rotation.x = (pointer.y - 0.5) * 0.3;
-    satellitesRef.current.rotation.z = audio.barPhase * Math.PI * 2;
+    satellitesRef.current.rotation.z =
+      state.clock.elapsedTime * (0.012 + seedSnapshot.profile.motion * 0.018);
     const moodScale = 0.82 + audio.arousal * 0.42 + audio.valence * 0.08;
     groupRef.current.scale.setScalar(
       THREE.MathUtils.lerp(
         groupRef.current.scale.x,
-        moodScale * (1 + audio.pulse * (0.012 + audio.arousal * 0.018)),
-        1 - Math.exp(-delta * 7.5),
+        moodScale,
+        1 - Math.exp(-delta * 1.8),
       ),
     );
   });
@@ -600,12 +765,32 @@ function SceneController({
   const secondLightRef = useRef<THREE.PointLight>(null);
   const pointerTarget = useMemo(() => new THREE.Vector3(), []);
 
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      rendererRef.current.contextLosses += 1;
+    };
+    canvas.addEventListener('webglcontextlost', handleContextLost);
+    return () => canvas.removeEventListener('webglcontextlost', handleContextLost);
+  }, [gl, rendererRef]);
+
   useFrame((state, delta) => {
     if (!rendererRef.current.webgl) {
       rendererRef.current.webgl = true;
       rendererRef.current.antialias = gl.getContextAttributes()?.antialias ?? false;
     }
     rendererRef.current.quality = gl.getPixelRatio();
+    rendererRef.current.maxFrameGapMs = Math.max(
+      rendererRef.current.maxFrameGapMs,
+      Math.min(1000, delta * 1000),
+    );
+    const normalizedSeed = seedToNumber(seedSnapshot.currentSeed) / 4294967295;
+    const styleVariant = shaderVariantIndex(normalizedSeed);
+    rendererRef.current.styleVariant =
+      CORE_EMOTIONS.indexOf(seedSnapshot.emotion) * 3 + styleVariant;
+    rendererRef.current.styleName =
+      EMOTION_SHADER_TEMPLATES[seedSnapshot.emotion][styleVariant].label;
     const pointer = pointerRef.current;
     pointer.x += (pointer.targetX - pointer.x) * (1 - Math.exp(-delta * 4.8));
     pointer.y += (pointer.targetY - pointer.y) * (1 - Math.exp(-delta * 4.8));
@@ -625,7 +810,7 @@ function SceneController({
     };
     rendererRef.current.barPhase = audioRef.current.barPhase;
     rendererRef.current.beatPhase = audioRef.current.beatPhase;
-    rendererRef.current.pulse = audioRef.current.pulse;
+    rendererRef.current.pulse = 0;
 
     const mobile = state.size.width < 720;
     pointerTarget.set(
@@ -640,9 +825,7 @@ function SceneController({
       lightRef.current.position.x = -2.2 + (pointer.x - 0.5) * 1.2;
       lightRef.current.position.y = 2.1 + (0.5 - pointer.y) * 0.9;
       lightRef.current.intensity = 3 + audioRef.current.mid * 2.2;
-      lightRef.current.intensity += audioRef.current.pulse * 0.28;
-      secondLightRef.current.intensity =
-        1.2 + audioRef.current.treble * 3 + audioRef.current.pulse * 0.16;
+      secondLightRef.current.intensity = 1.2 + audioRef.current.treble * 3;
     }
 
     const windowState = frameWindow.current;
@@ -702,7 +885,16 @@ function SceneController({
         size={0.55 + seedSnapshot.profile.sparkle * 0.65}
         speed={0.055 + seedSnapshot.profile.motion * 0.08}
         opacity={0.22 + seedSnapshot.profile.sparkle * 0.2}
-        color={palette(seedSnapshot.profile.harmonicHue, seedSnapshot.profile.brightness).c}
+        color={
+          palette(
+            seedSnapshot.emotion,
+            seedSnapshot.profile.harmonicHue,
+            seedSnapshot.profile.brightness,
+            0.34,
+            0.56,
+            seedToNumber(seedSnapshot.currentSeed) / 4294967295,
+          ).c
+        }
         noise={1.2}
       />
       <fog attach="fog" args={['#03050d', 4.4, 10]} />
@@ -713,7 +905,7 @@ function SceneController({
 function PostEffects({ seedSnapshot }: { seedSnapshot: SeedSnapshot }) {
   const chromaticOffset = useMemo(() => new THREE.Vector2(0.00028, 0.00042), []);
   return (
-    <EffectComposer multisampling={4} frameBufferType={THREE.HalfFloatType}>
+    <EffectComposer multisampling={0} frameBufferType={THREE.UnsignedByteType}>
       <Bloom
         intensity={0.32 + seedSnapshot.profile.sparkle * 0.2}
         luminanceThreshold={0.52}
@@ -746,8 +938,9 @@ export function NagiScene(props: NagiSceneProps) {
     tension: 0,
     valence: 0.5,
   });
-  const [quality, setQuality] = useState(() =>
-    typeof window !== 'undefined' && window.innerWidth < 720 ? 1 : 1.45,
+  const quality = useMemo(
+    () => Math.min(window.devicePixelRatio || 1, window.innerWidth < 720 ? 1 : 1.35),
+    [],
   );
 
   return (
@@ -770,50 +963,6 @@ export function NagiScene(props: NagiSceneProps) {
     >
       <SceneController {...props} audioRef={audioRef} />
       <PostEffects seedSnapshot={props.seedSnapshot} />
-      <AdaptiveQuality
-        quality={quality}
-        rendererRef={props.rendererRef}
-        setQuality={setQuality}
-      />
     </Canvas>
   );
-}
-
-function AdaptiveQuality({
-  quality,
-  rendererRef,
-  setQuality,
-}: {
-  quality: number;
-  rendererRef: RefObject<NagiRendererDiagnostics>;
-  setQuality: (quality: number) => void;
-}) {
-  const lowFrames = useRef(0);
-  const highFrames = useRef(0);
-  useFrame((_, delta) => {
-    const fps = 1 / Math.max(delta, 0.001);
-    if (fps < 43) {
-      lowFrames.current += 1;
-      highFrames.current = 0;
-    } else if (fps > 57) {
-      highFrames.current += 1;
-      lowFrames.current = 0;
-    } else {
-      lowFrames.current = Math.max(0, lowFrames.current - 1);
-      highFrames.current = Math.max(0, highFrames.current - 1);
-    }
-    if (lowFrames.current > 100 && quality > 0.85) {
-      const next = Math.max(0.85, quality - 0.2);
-      setQuality(next);
-      rendererRef.current.quality = next;
-      lowFrames.current = 0;
-    }
-    if (highFrames.current > 480 && quality < 1.45 && window.innerWidth >= 720) {
-      const next = Math.min(1.45, quality + 0.1);
-      setQuality(next);
-      rendererRef.current.quality = next;
-      highFrames.current = 0;
-    }
-  });
-  return null;
 }
