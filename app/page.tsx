@@ -6,6 +6,7 @@ import {
   type NagiDiagnostics,
 } from '../lib/nagi/audio-engine';
 import {
+  clamp,
   profileFromSeed,
   randomSeed,
   seedToNumber,
@@ -25,10 +26,14 @@ const FRAGMENT_SHADER = `
 precision highp float;
 uniform vec2 u_resolution;
 uniform float u_time;
-uniform vec3 u_audio;
+uniform vec4 u_audio;
+uniform vec4 u_pointer;
 uniform vec2 u_seed;
 uniform float u_seedMix;
 uniform vec4 u_weather;
+uniform vec4 u_visual;
+
+#define PI 3.14159265359
 
 float hash21(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -36,79 +41,201 @@ float hash21(vec2 p) {
   return fract(p.x * p.y);
 }
 
-float valueNoise(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
-             mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
+float hash31(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.yzx + 33.33);
+  return fract((p.x + p.y) * p.z);
 }
 
-float fbm(vec2 p) {
+float noise3(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(hash31(i), hash31(i + vec3(1,0,0)), f.x),
+        mix(hash31(i + vec3(0,1,0)), hash31(i + vec3(1,1,0)), f.x), f.y),
+    mix(mix(hash31(i + vec3(0,0,1)), hash31(i + vec3(1,0,1)), f.x),
+        mix(hash31(i + vec3(0,1,1)), hash31(i + vec3(1,1,1)), f.x), f.y),
+    f.z
+  );
+}
+
+float fbm3(vec3 p) {
   float value = 0.0;
-  float amplitude = 0.54;
-  mat2 drift = mat2(0.81, -0.59, 0.59, 0.81);
-  for (int i = 0; i < 5; i++) {
-    value += valueNoise(p) * amplitude;
-    p = drift * p * 1.91 + 5.17;
-    amplitude *= 0.49;
+  float amplitude = 0.55;
+  for (int i = 0; i < 4; i++) {
+    value += noise3(p) * amplitude;
+    p = p * 1.93 + vec3(4.17, -2.31, 5.73);
+    amplitude *= 0.48;
   }
   return value;
 }
 
-float softParticle(vec2 uv, float seed, float density, float treble) {
-  vec2 grid = uv * mix(17.0, 25.0, density);
-  vec2 cell = floor(grid);
-  vec2 local = fract(grid) - 0.5;
-  float chance = hash21(cell + seed * 43.1);
-  vec2 offset = vec2(
-    hash21(cell + seed * 19.7) - 0.5,
-    hash21(cell + seed * 31.3 + 8.0) - 0.5
-  ) * 0.72;
-  float point = smoothstep(0.082, 0.0, length(local - offset));
-  float alive = smoothstep(0.89 - density * 0.09, 0.94, chance);
-  float glint = 0.34 + treble * 1.8 + valueNoise(cell * 0.37 + u_time * 0.007);
-  return point * alive * glint;
+mat2 rotate2(float angle) {
+  float s = sin(angle);
+  float c = cos(angle);
+  return mat2(c, -s, s, c);
+}
+
+float smoothMin(float a, float b, float amount) {
+  float h = clamp(0.5 + 0.5 * (b - a) / amount, 0.0, 1.0);
+  return mix(b, a, h) - amount * h * (1.0 - h);
+}
+
+float sphereSdf(vec3 p, float radius) {
+  return length(p) - radius;
+}
+
+float torusSdf(vec3 p, vec2 radii) {
+  vec2 q = vec2(length(p.xz) - radii.x, p.y);
+  return length(q) - radii.y;
+}
+
+float roundedBoxSdf(vec3 p, vec3 bounds, float radius) {
+  vec3 q = abs(p) - bounds;
+  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - radius;
+}
+
+float world(vec3 p, float seed, float shape, float flow, float interaction) {
+  float t = u_time * (0.035 + u_weather.w * 0.035);
+  p.xy *= rotate2(0.18 * sin(t * 0.31 + seed * 9.0));
+  p.xz *= rotate2(t * 0.12 + seed * 1.7);
+  float wave = sin(p.x * 2.6 + t) * sin(p.y * 2.2 - t * 0.7) * sin(p.z * 2.4 + seed * 8.0);
+  p += vec3(
+    sin(p.y * 1.8 + t),
+    sin(p.z * 1.5 - t * 0.8),
+    cos(p.x * 1.7 + t * 0.6)
+  ) * (0.045 + flow * 0.075);
+
+  float orb = sphereSdf(p + vec3(0.18, -0.04, 0.0), 0.72 + u_audio.x * 0.14);
+  float moon = sphereSdf(p - vec3(0.63, 0.22, 0.18), 0.31 + flow * 0.08);
+  float joined = smoothMin(orb, moon, 0.38 + flow * 0.18);
+  float ring = torusSdf(p.xzy, vec2(0.68 + flow * 0.18, 0.09 + shape * 0.11));
+  float crystal = roundedBoxSdf(p * vec3(0.9, 1.12, 0.88), vec3(0.5, 0.58, 0.44), 0.16);
+  float gyroid = abs(
+    dot(sin(p * (2.4 + flow * 1.7)), cos(p.zxy * (2.4 + flow * 1.7))) / 2.2
+  ) - (0.13 + shape * 0.08);
+  float torusBlend = smoothstep(0.16, 0.46, shape) * (1.0 - smoothstep(0.56, 0.76, shape));
+  float crystalBlend = smoothstep(0.38, 0.66, flow) * (1.0 - smoothstep(0.72, 0.94, shape));
+  float object = mix(joined, ring, torusBlend * 0.9);
+  object = mix(object, crystal, crystalBlend * 0.62);
+  object = mix(object, gyroid, smoothstep(0.64, 0.9, shape));
+  object += wave * (0.035 + flow * 0.055);
+
+  vec2 cursor = u_pointer.xy * vec2(0.62, 0.42);
+  float cursorDistance = length(p.xy - cursor);
+  object -= interaction * 0.08 * exp(-cursorDistance * 3.4) * sin(cursorDistance * 15.0 - t * 5.0);
+  return object;
+}
+
+vec3 worldNormal(vec3 p, float seed, float shape, float flow, float interaction) {
+  vec2 e = vec2(0.0035, 0.0);
+  float d = world(p, seed, shape, flow, interaction);
+  return normalize(vec3(
+    world(p + e.xyy, seed, shape, flow, interaction) - d,
+    world(p + e.yxy, seed, shape, flow, interaction) - d,
+    world(p + e.yyx, seed, shape, flow, interaction) - d
+  ));
+}
+
+float deepStars(vec2 uv, float seed, float sparkle, float treble) {
+  float sum = 0.0;
+  for (int layer = 0; layer < 3; layer++) {
+    float depth = float(layer) + 1.0;
+    vec2 gridUv = uv * (12.0 + depth * 9.0);
+    gridUv += vec2(u_time * 0.0016 * depth, -u_time * 0.0011 * depth);
+    vec2 cell = floor(gridUv);
+    vec2 local = fract(gridUv) - 0.5;
+    float chance = hash21(cell + seed * (31.0 + depth));
+    vec2 offset = vec2(hash21(cell + 4.7), hash21(cell + 9.3)) - 0.5;
+    float point = smoothstep(0.06 / depth, 0.0, length(local - offset * 0.72));
+    float alive = smoothstep(0.955 - sparkle * 0.045, 0.985, chance);
+    sum += point * alive * (0.22 + treble * 1.9) / depth;
+  }
+  return sum;
 }
 
 void main() {
   vec2 uv = gl_FragCoord.xy / u_resolution.xy;
-  vec2 p = uv - 0.5;
-  p.x *= u_resolution.x / u_resolution.y;
+  vec2 screen = uv * 2.0 - 1.0;
+  screen.x *= u_resolution.x / u_resolution.y;
 
   float seed = mix(u_seed.x, u_seed.y, u_seedMix);
   float brightness = u_weather.x;
   float density = u_weather.y;
   float harmony = u_weather.z;
-  float motion = u_weather.w;
-  float t = u_time * mix(0.008, 0.022, motion);
-  vec2 seedOffset = vec2(seed * 3.7, seed * -2.1);
+  float shape = u_visual.x;
+  float flow = u_visual.y;
+  float depth = u_visual.z;
+  float sparkle = u_visual.w;
+  float interaction = max(u_audio.w, u_pointer.z);
 
-  float broad = fbm(p * 1.08 + seedOffset + vec2(t, -t * 0.57));
-  float folding = fbm(p * 2.02 - seedOffset * 0.18 - vec2(t * 0.63, t * 0.27) + broad * 0.72);
-  float veil = fbm(p * 3.96 + vec2(folding * 0.52, -t * 0.32) + seedOffset * 0.09);
+  vec3 night = mix(vec3(0.006, 0.011, 0.027), vec3(0.018, 0.012, 0.038), harmony);
+  vec3 sea = mix(vec3(0.055, 0.205, 0.275), vec3(0.16, 0.10, 0.31), harmony);
+  vec3 iris = mix(vec3(0.29, 0.48, 0.52), vec3(0.53, 0.26, 0.54), harmony);
+  vec3 pearl = mix(vec3(0.64, 0.78, 0.76), vec3(0.79, 0.61, 0.73), harmony);
 
-  vec3 night = mix(vec3(0.010, 0.016, 0.039), vec3(0.018, 0.021, 0.051), harmony);
-  vec3 sea = mix(vec3(0.095, 0.205, 0.285), vec3(0.125, 0.176, 0.34), harmony);
-  vec3 lilac = mix(vec3(0.265, 0.295, 0.36), vec3(0.365, 0.27, 0.43), harmony);
-  vec3 pearl = mix(vec3(0.57, 0.65, 0.66), vec3(0.70, 0.60, 0.68), harmony);
+  vec3 ro = vec3(u_pointer.x * 0.18, u_pointer.y * 0.12, 3.25 + depth * 0.45);
+  vec3 rd = normalize(vec3(screen, -1.72 - depth * 0.28));
+  rd.yz *= rotate2(-u_pointer.y * 0.07);
+  rd.xz *= rotate2(u_pointer.x * 0.09);
 
-  vec3 color = mix(night, sea, smoothstep(0.20, 0.90, broad));
-  color = mix(color, lilac, smoothstep(0.45, 0.91, folding) * (0.36 + brightness * 0.23));
-  color = mix(color, pearl, pow(max(veil - 0.58, 0.0), 2.0) * (0.8 + brightness));
+  float travel = 0.0;
+  float mist = 0.0;
+  float halo = 0.0;
+  float hit = 0.0;
+  vec3 hitPosition = vec3(0.0);
+  for (int step = 0; step < 34; step++) {
+    vec3 position = ro + rd * travel;
+    float distance = world(position, seed, shape, flow, interaction);
+    float proximity = exp(-abs(distance) * (7.0 + depth * 5.0));
+    halo += proximity * (0.012 + density * 0.009);
+    float volumeNoise = noise3(position * (1.1 + flow) + vec3(seed * 7.0, u_time * 0.008, 0.0));
+    mist += smoothstep(0.55, 0.92, volumeNoise) * (0.002 + density * 0.0018);
+    if (distance < 0.004) {
+      hit = 1.0;
+      hitPosition = position;
+      break;
+    }
+    travel += clamp(abs(distance) * 0.68, 0.025, 0.19);
+    if (travel > 7.0) break;
+  }
 
-  float lowBreath = 0.05 + min(u_audio.x, 0.34) * 0.52;
-  vec2 breathCenter = vec2(-0.12 + seed * 0.16, 0.04 - seed * 0.08);
-  float breath = exp(-3.3 * length(p - breathCenter));
-  color += mix(sea, pearl, 0.24) * breath * lowBreath;
+  float cloud = fbm3(vec3(screen * (0.34 + depth * 0.16), seed * 4.0 + u_time * 0.006));
+  vec3 color = mix(night, sea * 0.55, smoothstep(0.35, 0.92, cloud) * 0.6);
+  color += sea * mist * (0.7 + depth * 1.2);
+  color += mix(sea, iris, shape) * halo * (0.92 + u_audio.y * 0.9);
 
-  float particles = softParticle(uv + vec2(t * 0.04, -t * 0.025), seed, density, u_audio.y);
-  color += pearl * particles * (0.016 + brightness * 0.014);
+  float angle = atan(screen.y, screen.x) + seed * PI * 2.0;
+  float shafts = pow(max(0.0, sin(angle * (3.0 + floor(flow * 4.0)) + cloud * 3.0)), 10.0);
+  shafts *= exp(-length(screen) * (1.2 + depth));
+  color += mix(sea, pearl, 0.28) * shafts * (0.018 + sparkle * 0.035);
 
-  float vignette = smoothstep(0.26, 1.07, length(p));
-  color *= 1.0 - vignette * 0.47;
+  if (hit > 0.5) {
+    vec3 normal = worldNormal(hitPosition, seed, shape, flow, interaction);
+    vec3 lightDirection = normalize(vec3(-0.55 + u_pointer.x * 0.3, 0.7, 0.46));
+    float diffuse = max(dot(normal, lightDirection), 0.0);
+    float fresnel = pow(1.0 - max(dot(normal, -rd), 0.0), 2.6);
+    float specular = pow(max(dot(reflect(-lightDirection, normal), -rd), 0.0), 22.0);
+    float bands = 0.5 + 0.5 * sin(hitPosition.y * (8.0 + flow * 8.0) + u_time * 0.16 + seed * 17.0);
+    float caustic = pow(bands, 5.0) * (0.12 + flow * 0.22);
+    vec3 surface = mix(sea * 0.82, iris * 1.2, diffuse * 0.72 + bands * 0.26);
+    surface = mix(surface, pearl, fresnel * (0.5 + sparkle * 0.42));
+    surface += pearl * (specular * 0.7 + caustic + u_audio.x * 0.22 * diffuse);
+    color = mix(color, surface, 0.66 + fresnel * 0.25);
+  }
+
+  float cursorGlow = exp(-length(screen - u_pointer.xy * vec2(1.0, 0.72)) * (3.8 - interaction));
+  color += mix(sea, pearl, 0.38) * cursorGlow * interaction * 0.15;
+  float stars = deepStars(uv + u_pointer.xy * 0.014, seed, sparkle, u_audio.z);
+  color += pearl * stars * (0.09 + brightness * 0.075);
+
+  float vignette = smoothstep(0.36, 1.36, length(screen));
+  color *= 1.0 - vignette * 0.48;
+  color *= 0.86 + brightness * 0.28;
   float grain = hash21(gl_FragCoord.xy + mod(u_time * 13.0, 83.0)) - 0.5;
-  color += grain * 0.009;
+  color += grain * 0.008;
+  color = pow(max(color, 0.0), vec3(0.92));
   gl_FragColor = vec4(color, 1.0);
 }
 `;
@@ -116,6 +243,7 @@ void main() {
 type RendererDiagnostics = {
   fps: number;
   frames: number;
+  pointerEnergy: number;
   quality: number;
   webgl: boolean;
 };
@@ -128,17 +256,25 @@ type DebugSurface = {
   };
 };
 
+type PointerField = {
+  down: number;
+  lastAt: number;
+  lastX: number;
+  lastY: number;
+  targetEnergy: number;
+  targetX: number;
+  targetY: number;
+  x: number;
+  y: number;
+};
+
 declare global {
   interface Window {
     __NAGI_DEBUG__?: DebugSurface;
   }
 }
 
-function createShader(
-  gl: WebGLRenderingContext,
-  type: number,
-  source: string,
-) {
+function createShader(gl: WebGLRenderingContext, type: number, source: string) {
   const shader = gl.createShader(type);
   if (!shader) return null;
   gl.shaderSource(shader, source);
@@ -156,10 +292,22 @@ export default function Home() {
   const diagnosticsRef = useRef<HTMLOutputElement>(null);
   const engineRef = useRef<NagiAudioEngine | null>(null);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pointerRef = useRef<PointerField>({
+    down: 0,
+    lastAt: 0,
+    lastX: 0.5,
+    lastY: 0.5,
+    targetEnergy: 0,
+    targetX: 0.5,
+    targetY: 0.5,
+    x: 0.5,
+    y: 0.5,
+  });
   const seedRef = useRef(FALLBACK_SEED);
   const rendererRef = useRef<RendererDiagnostics>({
     fps: 0,
     frames: 0,
+    pointerEnergy: 0,
     quality: 1,
     webgl: false,
   });
@@ -176,7 +324,7 @@ export default function Home() {
   });
   const [started, setStarted] = useState(false);
   const [starting, setStarting] = useState(false);
-  const [volume, setVolume] = useState(0.56);
+  const [volume, setVolume] = useState(0.62);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -199,6 +347,30 @@ export default function Home() {
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
     hideTimerRef.current = setTimeout(() => setControlsVisible(false), 3200);
   }, [started]);
+
+  const updatePointer = useCallback(
+    (clientX: number, clientY: number, pressed: boolean) => {
+      const pointer = pointerRef.current;
+      const width = Math.max(1, window.innerWidth);
+      const height = Math.max(1, window.innerHeight);
+      const x = clamp(clientX / width);
+      const y = clamp(clientY / height);
+      const now = performance.now();
+      const elapsed = Math.max(12, now - pointer.lastAt);
+      const distance = Math.hypot(x - pointer.lastX, y - pointer.lastY);
+      const velocity = clamp((distance * 1000) / elapsed * 0.58);
+      pointer.targetX = x;
+      pointer.targetY = y;
+      pointer.targetEnergy = Math.max(pointer.targetEnergy, velocity);
+      pointer.down = pressed ? 1 : 0;
+      pointer.lastX = x;
+      pointer.lastY = y;
+      pointer.lastAt = now;
+      engineRef.current?.setInteraction(x, y, velocity, pressed);
+      revealControls();
+    },
+    [revealControls],
+  );
 
   const begin = useCallback(async () => {
     if (starting || started) return;
@@ -268,18 +440,16 @@ export default function Home() {
 
     const buffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      new Float32Array([-1, -1, 3, -1, -1, 3]),
-      gl.STATIC_DRAW,
-    );
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
     const position = gl.getAttribLocation(program, 'a_position');
     const uniforms = {
       audio: gl.getUniformLocation(program, 'u_audio'),
+      pointer: gl.getUniformLocation(program, 'u_pointer'),
       resolution: gl.getUniformLocation(program, 'u_resolution'),
       seed: gl.getUniformLocation(program, 'u_seed'),
       seedMix: gl.getUniformLocation(program, 'u_seedMix'),
       time: gl.getUniformLocation(program, 'u_time'),
+      visual: gl.getUniformLocation(program, 'u_visual'),
       weather: gl.getUniformLocation(program, 'u_weather'),
     };
     const startedAt = performance.now();
@@ -287,6 +457,7 @@ export default function Home() {
     let lastFrameAt = startedAt;
     let fpsWindowAt = startedAt;
     let fpsFrames = 0;
+    let diagnosticsAt = startedAt;
     let quality = 1;
 
     const rendererDiagnostics = rendererRef.current;
@@ -299,21 +470,26 @@ export default function Home() {
       if (now - fpsWindowAt >= 2500) {
         const fps = (fpsFrames * 1000) / (now - fpsWindowAt);
         rendererDiagnostics.fps = Math.round(fps * 10) / 10;
-        if (now - startedAt > 6000 && fps < 44 && quality > 0.72) quality = 0.72;
-        if (fps > 56 && quality < 1) quality = Math.min(1, quality + 0.06);
-        rendererDiagnostics.quality = quality;
-        if (diagnosticsRef.current) {
-          diagnosticsRef.current.textContent = JSON.stringify({
-            audio: engineRef.current?.getDiagnostics() ?? null,
-            renderer: rendererDiagnostics,
-          });
+        if (now - startedAt > 6000 && fps < 48 && quality > 0.56) {
+          quality = Math.max(0.56, quality * 0.82);
         }
+        if (fps > 58 && quality < 1) quality = Math.min(1, quality + 0.05);
+        rendererDiagnostics.quality = quality;
+        rendererDiagnostics.pointerEnergy = pointerRef.current.targetEnergy;
         fpsFrames = 0;
         fpsWindowAt = now;
       }
 
+      if (now - diagnosticsAt >= 500 && diagnosticsRef.current) {
+        diagnosticsRef.current.textContent = JSON.stringify({
+          audio: engineRef.current?.getDiagnostics() ?? null,
+          renderer: rendererDiagnostics,
+        });
+        diagnosticsAt = now;
+      }
+
       if (!document.hidden && frameDelta < 1000) {
-        const mobileCap = window.innerWidth < 720 ? 1.28 : 1.75;
+        const mobileCap = window.innerWidth < 720 ? 1 : 1.3;
         const dpr = Math.min(window.devicePixelRatio || 1, mobileCap) * quality;
         const width = Math.max(1, Math.round(window.innerWidth * dpr));
         const height = Math.max(1, Math.round(window.innerHeight * dpr));
@@ -330,7 +506,16 @@ export default function Home() {
           profile: profileFromSeed(seedRef.current),
           transition: 0,
         };
-        const bands = engine?.readAudioBands() ?? { bass: 0.04, treble: 0.015 };
+        const bands = engine?.readAudioBands() ?? {
+          bass: 0.035,
+          mid: 0.025,
+          treble: 0.012,
+          interaction: 0,
+        };
+        const pointer = pointerRef.current;
+        pointer.x += (pointer.targetX - pointer.x) * 0.055;
+        pointer.y += (pointer.targetY - pointer.y) * 0.055;
+        pointer.targetEnergy *= pointer.down > 0 ? 0.97 : 0.9;
         const seedA = seedToNumber(snapshot.currentSeed) / 4294967295;
         const seedB = snapshot.incomingSeed
           ? seedToNumber(snapshot.incomingSeed) / 4294967295
@@ -341,11 +526,13 @@ export default function Home() {
         gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
         gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
         gl.uniform1f(uniforms.time, (now - startedAt) / 1000);
-        gl.uniform3f(
-          uniforms.audio,
-          bands.bass,
-          bands.treble,
-          snapshot.profile.density,
+        gl.uniform4f(uniforms.audio, bands.bass, bands.mid, bands.treble, bands.interaction);
+        gl.uniform4f(
+          uniforms.pointer,
+          pointer.x * 2 - 1,
+          1 - pointer.y * 2,
+          pointer.targetEnergy,
+          pointer.down,
         );
         gl.uniform2f(uniforms.seed, seedA, seedB);
         gl.uniform1f(uniforms.seedMix, snapshot.transition);
@@ -355,6 +542,13 @@ export default function Home() {
           snapshot.profile.density,
           snapshot.profile.harmonicHue,
           snapshot.profile.motion,
+        );
+        gl.uniform4f(
+          uniforms.visual,
+          snapshot.profile.shape,
+          snapshot.profile.flow,
+          snapshot.profile.depth,
+          snapshot.profile.sparkle,
         );
         gl.drawArrays(gl.TRIANGLES, 0, 3);
       }
@@ -401,8 +595,16 @@ export default function Home() {
       className={`nagi-shell ${started ? 'has-started' : ''}`}
       data-controls-visible={controlsVisible}
       data-ready={ready}
-      onPointerMove={revealControls}
-      onPointerDown={revealControls}
+      onPointerMove={(event) => updatePointer(event.clientX, event.clientY, event.buttons > 0)}
+      onPointerDown={(event) => updatePointer(event.clientX, event.clientY, true)}
+      onPointerUp={(event) => updatePointer(event.clientX, event.clientY, false)}
+      onPointerCancel={(event) => updatePointer(event.clientX, event.clientY, false)}
+      onPointerLeave={() => {
+        pointerRef.current.targetX = 0.5;
+        pointerRef.current.targetY = 0.5;
+        pointerRef.current.down = 0;
+        engineRef.current?.setInteraction(0.5, 0.5, 0, false);
+      }}
       onFocusCapture={() => started && setControlsVisible(true)}
     >
       <canvas ref={canvasRef} className="nagi-canvas" aria-hidden="true" />
@@ -413,9 +615,7 @@ export default function Home() {
         <p className="nagi-kanji" lang="ja">凪</p>
         <h1 id="nagi-title">NAGI</h1>
         <div className="nagi-seed" aria-label={`current seed ${seedSnapshot.currentSeed}`}>
-          <span style={{ opacity: 1 - incomingOpacity }}>
-            seed {seedSnapshot.currentSeed}
-          </span>
+          <span style={{ opacity: 1 - incomingOpacity }}>seed {seedSnapshot.currentSeed}</span>
           {seedSnapshot.incomingSeed && (
             <span style={{ opacity: incomingOpacity }} aria-hidden="true">
               seed {seedSnapshot.incomingSeed}
@@ -462,7 +662,7 @@ export default function Home() {
           <input
             type="range"
             min="0.06"
-            max="0.86"
+            max="0.9"
             step="0.01"
             value={volume}
             tabIndex={controlsVisible ? 0 : -1}
@@ -483,12 +683,7 @@ export default function Home() {
       <p className="nagi-status sr-only" aria-live="polite">
         {started ? (playing ? 'NAGI is sounding' : 'NAGI is paused') : ''}
       </p>
-      <output
-        ref={diagnosticsRef}
-        id="nagi-diagnostics"
-        hidden
-        aria-hidden="true"
-      />
+      <output ref={diagnosticsRef} id="nagi-diagnostics" hidden aria-hidden="true" />
     </main>
   );
 }

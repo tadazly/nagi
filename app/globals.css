@@ -84,7 +84,7 @@ button {
   background:
     linear-gradient(180deg, rgba(4, 7, 15, 0.14), transparent 28%, rgba(3, 5, 12, 0.31)),
     radial-gradient(circle at center, transparent 18%, rgba(2, 4, 11, 0.28) 100%);
-  mix-blend-mode: multiply;
+  opacity: 0.58;
 }
 
 .nagi-grain {
