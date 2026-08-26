@@ -1,3 +1,8 @@
+import {
+  classicalBassIntervalAffinity,
+  classicalChordToneProbability,
+} from './classical-prior.ts';
+
 export type WeatherProfile = {
   brightness: number;
   density: number;
@@ -63,6 +68,7 @@ export type RhythmEvent = {
 
 export type MelodyChoiceContext = {
   backgroundNotes?: readonly number[];
+  bassMidi?: number;
   direction?: -1 | 0 | 1;
   metricStrength?: number;
   mustResolve?: boolean;
@@ -359,14 +365,12 @@ export const chordPitchClasses = (
   const harmonicFunction = harmonicFunctionForDegree(scene, degree);
   let offsets: readonly number[] = [0, 2, 4];
   if (color > 0.7) {
-    offsets = harmonicFunction === 'tonic' ? [0, 2, 4, 5, 1] : [0, 2, 4, 6, 1];
+    offsets = harmonicFunction === 'tonic' ? [0, 2, 4, 5] : [0, 2, 4, 6];
   } else if (color > 0.38) {
     offsets =
       harmonicFunction === 'tonic'
         ? [0, 2, 4, 5]
-        : harmonicFunction === 'dominant'
-          ? [0, 2, 4, 6]
-          : [0, 1, 2, 4];
+        : [0, 2, 4, 6];
   }
   const classes = offsets.map((offset) => {
     const scaleIndex = degree + offset;
@@ -622,10 +626,18 @@ export const pickMelodyMidi = (
       const interval = midi - previousMidi;
       const distance = Math.abs(interval);
       const chordTone = chordClasses.has(pitchClass(midi));
+      const modeClass = scene.valence >= 0.48 ? 'major' : 'minor';
+      const learnedChordToneProbability = classicalChordToneProbability(
+        modeClass,
+        metricStrength,
+      );
       let score = distance * 0.16 + Math.abs(midi - target) * 0.075;
       if (distance === 0) score += 1.35;
       if (distance > 7) score += (distance - 7) * 0.75;
       score += chordTone ? -1.05 - metricStrength * 1.25 : metricStrength * 1.55;
+      score += chordTone
+        ? -(learnedChordToneProbability - 0.5) * 1.25
+        : (learnedChordToneProbability - 0.5) * 1.25;
       if (context.mustResolve) {
         score += chordTone && distance <= 2 ? -2.7 : 2.2;
       }
@@ -650,6 +662,10 @@ export const pickMelodyMidi = (
           0,
         );
         score += roughness * (0.45 + metricStrength * 1.05);
+      }
+      if (context.bassMidi !== undefined) {
+        const bassInterval = pitchClass(midi - context.bassMidi);
+        score -= classicalBassIntervalAffinity(bassInterval) * 0.72;
       }
       const scaleDegree = mode.indexOf(pitchClass(midi - scene.tonic));
       const tonalStability = [1, 0.44, 0.7, 0.58, 0.9, 0.64, 0.36][scaleDegree] ?? 0.45;

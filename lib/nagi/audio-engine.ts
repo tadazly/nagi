@@ -198,12 +198,19 @@ export class NagiAudioEngine {
     this.targetArousal = this.currentArousal;
     this.targetValence = this.currentValence;
     this.transportTempo = this.harmonicScene.tempo;
-    this.leadMotif = createMotif(this.random, this.currentArousal, 'lead');
+    this.leadMotif = createMotif(
+      this.random,
+      this.currentArousal,
+      'lead',
+      undefined,
+      this.currentValence,
+    );
     this.counterMotif = createMotif(
       this.random,
       this.currentArousal,
       'counter',
       this.leadMotif,
+      this.currentValence,
     );
     this.chordsUntilSceneChange = options.debugFast
       ? 2
@@ -795,7 +802,7 @@ export class NagiAudioEngine {
     const filter = context.createBiquadFilter();
     filter.type = 'lowpass';
     filter.frequency.value =
-      900 + profile.brightness * 2500 + this.currentArousal * 620 + index * 125;
+      720 + profile.brightness * 1900 + this.currentArousal * 480 + index * 105;
     filter.Q.value = 0.32 + profile.warmth * 0.32;
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
@@ -886,7 +893,7 @@ export class NagiAudioEngine {
         motifIndex: 0,
       });
     }
-    const counterEvents =
+    const plannedCounterEvents =
       profile.density > 0.43 &&
       (opening || this.random.next() < 0.35 + this.currentArousal * 0.36)
         ? planMotifPhrase(
@@ -898,9 +905,15 @@ export class NagiAudioEngine {
             this.phraseBar,
           )
         : [];
+    const counterEvents = plannedCounterEvents
+      .filter((event) =>
+        leadEvents.every((leadEvent) => Math.abs(leadEvent.beat - event.beat) > 0.45),
+      )
+      .slice(0, Math.max(1, Math.floor(leadEvents.length * 0.45)));
 
     const scheduleVoice = (role: 'lead' | 'counter') => {
       const events = role === 'lead' ? leadEvents : counterEvents;
+      const totalChordBeats = meter.beatsPerBar * spanBars;
       for (let index = 0; index < events.length; index += 1) {
         if (this.trackedSources.size >= 40) break;
         const event = events[index];
@@ -913,18 +926,23 @@ export class NagiAudioEngine {
         const mustResolve = role === 'lead'
           ? this.leadNeedsResolution
           : this.counterNeedsResolution;
+        const endingSoon =
+          event.beat + event.durationBeats >= totalChordBeats - 0.5 ||
+          index === events.length - 1;
         const targetMidi =
           (role === 'lead' ? 70 : 62) + contour * (role === 'lead' ? 4.2 : 3.1);
         const targetPitchClass = motifPitchClass(scene, event.motifDegree);
+        const bassMidi = chordRootMidi(scene, this.chordDegree);
         const backgroundNotes = [
           ...this.currentVoicing,
-          chordRootMidi(scene, this.chordDegree),
+          bassMidi,
         ];
         const midi = pickMelodyMidi(scene, this.chordDegree, previous, this.random, {
           backgroundNotes,
+          bassMidi,
           direction,
           metricStrength: event.metricStrength,
-          mustResolve,
+          mustResolve: mustResolve || endingSoon,
           otherVoiceMidi: role === 'counter' ? this.lastMelodyMidi : this.lastCounterMidi,
           registerHigh: role === 'lead' ? 84 : 74,
           registerLow: role === 'lead' ? 60 : 52,
@@ -946,6 +964,10 @@ export class NagiAudioEngine {
           start + 0.035,
           start + event.beat * beatSeconds + humanizeSeconds,
         );
+        const maximumDuration = Math.max(
+          0.42,
+          start + totalChordBeats * beatSeconds + 0.58 - noteStart,
+        );
         this.scheduleMotifNote(
           noteStart,
           midi,
@@ -955,6 +977,7 @@ export class NagiAudioEngine {
           role,
           event.accent,
           event.durationBeats * beatSeconds,
+          maximumDuration,
         );
       }
     };
@@ -972,6 +995,7 @@ export class NagiAudioEngine {
     role: 'lead' | 'counter',
     accent: number,
     rhythmicDuration: number,
+    maximumDuration: number,
   ) {
     if (!this.context || !this.effectsBus || !this.bellWave || !this.airWave) return;
     const context = this.context;
@@ -990,10 +1014,13 @@ export class NagiAudioEngine {
     const spatialDrift = Math.sin((index / Math.max(1, count)) * Math.PI * 2) * 0.11;
     panner.pan.value = (spatialAnchor + spatialDrift) * profile.spread;
     const tail = this.random.between(
-      role === 'lead' ? 1.45 : 2.4,
-      role === 'lead' ? 3.4 : 4.7,
+      role === 'lead' ? 0.82 + (1 - this.currentArousal) * 0.35 : 1.8,
+      role === 'lead' ? 1.9 + (1 - this.currentArousal) * 0.45 : 3.6,
     );
-    const duration = Math.max(rhythmicDuration, tail) * (0.84 + profile.space * 0.24);
+    const duration = Math.min(
+      maximumDuration,
+      Math.max(rhythmicDuration, tail) * (0.84 + profile.space * 0.24),
+    );
     const peakBase = role === 'lead'
       ? this.random.between(0.021, 0.033)
       : this.random.between(0.007, 0.014);

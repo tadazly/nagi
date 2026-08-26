@@ -8,6 +8,10 @@ import {
   type RhythmEvent,
   type RhythmRole,
 } from './generative.ts';
+import {
+  sampleClassicalContour,
+  sampleClassicalRhythm,
+} from './classical-prior.ts';
 
 export type MotifDNA = {
   anchorDegree: number;
@@ -27,21 +31,6 @@ export type MotifEvent = RhythmEvent & {
   motifIndex: number;
 };
 
-const LEAD_CONTOURS = [
-  [0, 1, 2, 1, 3, 2, 0],
-  [0, 2, 1, 3, 2, 1],
-  [0, -1, 1, 2, 1, 0],
-  [0, 2, 4, 3, 1, 2, 0],
-  [0, 1, 3, 2, 4, 2, 1],
-] as const;
-
-const LEAD_RHYTHMS = [
-  [0.75, 0.5, 1, 0.75, 1.5, 0.5, 1.25],
-  [0.5, 1, 0.75, 0.5, 1.25, 1.5],
-  [1, 0.5, 0.5, 1.5, 0.75, 1.25],
-  [0.5, 0.75, 1.25, 0.5, 1, 0.75, 1.5],
-] as const;
-
 const wrap = (value: number, length: number) =>
   ((value % length) + length) % length;
 
@@ -52,6 +41,7 @@ export const createMotif = (
   arousal: number,
   role: RhythmRole,
   related?: MotifDNA,
+  valence = 0.5,
 ): MotifDNA => {
   if (role === 'counter' && related) {
     const contour = related.contour
@@ -75,9 +65,10 @@ export const createMotif = (
     };
   }
 
-  const contour = clonePattern(random.pick(LEAD_CONTOURS));
-  const rhythm = clonePattern(random.pick(LEAD_RHYTHMS)).slice(0, contour.length);
-  const pace = 1.16 - clamp(arousal) * 0.34;
+  const mode = valence >= 0.48 ? 'major' : 'minor';
+  const motifLength = 5 + Math.floor(random.next() * 3);
+  const contour = sampleClassicalContour(random, motifLength, mode);
+  const rhythm = sampleClassicalRhythm(random, contour.length, mode, arousal);
   return {
     anchorDegree: random.pick([0, 0, 2, 4, 5] as const),
     contour,
@@ -86,7 +77,7 @@ export const createMotif = (
     direction: random.next() < 0.22 ? -1 : 1,
     mutations: 0,
     remainingBeats: 0,
-    rhythmBeats: rhythm.map((beat) => clamp(beat * pace, 0.5, 2)),
+    rhythmBeats: clonePattern(rhythm),
     sequenceDegree: 0,
   };
 };
@@ -127,7 +118,7 @@ export const planMotifPhrase = (
 ) => {
   const meter = METERS[scene.meterIndex];
   const totalBeats = spanBars * meter.beatsPerBar;
-  const maximumEvents = role === 'lead' ? 20 : 12;
+  const maximumEvents = role === 'lead' ? 16 : 9;
   let beat = Math.max(0, motif.remainingBeats);
   const events: MotifEvent[] = [];
 

@@ -26,6 +26,7 @@ import {
   motifPitchClass,
   planMotifPhrase,
 } from '../lib/nagi/composition.ts';
+import { CLASSICAL_MODEL_META } from '../lib/nagi/classical-prior.ts';
 
 const HOURS = 24;
 const END_SECONDS = HOURS * 60 * 60;
@@ -85,8 +86,14 @@ let leadMidi = 69;
 let counterMidi = 62;
 let leadNeedsResolution = false;
 let counterNeedsResolution = false;
-const leadMotif = createMotif(random, currentArousal, 'lead');
-const counterMotif = createMotif(random, currentArousal, 'counter', leadMotif);
+const leadMotif = createMotif(random, currentArousal, 'lead', undefined, currentValence);
+const counterMotif = createMotif(
+  random,
+  currentArousal,
+  'counter',
+  leadMotif,
+  currentValence,
+);
 let totalVoiceMovement = 0;
 let voiceMovementSamples = 0;
 let totalLeadMovement = 0;
@@ -206,7 +213,7 @@ while (now < END_SECONDS) {
     leadMotif,
     phraseBar,
   );
-  const counterEvents = planMotifPhrase(
+  const plannedCounterEvents = planMotifPhrase(
     sceneForChord,
     spanBars,
     random,
@@ -214,6 +221,11 @@ while (now < END_SECONDS) {
     counterMotif,
     phraseBar,
   );
+  const counterEvents = plannedCounterEvents
+    .filter((event) =>
+      leadEvents.every((leadEvent) => Math.abs(leadEvent.beat - event.beat) > 0.45),
+    )
+    .slice(0, Math.max(1, Math.floor(leadEvents.length * 0.45)));
   const leadSteps = new Set(
     leadEvents.map((event) => Math.round(event.beat * meter.subdivisionsPerBeat)),
   );
@@ -249,6 +261,7 @@ while (now < END_SECONDS) {
       const backgroundNotes = [...voicing, bass];
       const midi = pickMelodyMidi(sceneForChord, chordDegree, previous, random, {
         backgroundNotes,
+        bassMidi: bass,
         direction,
         metricStrength: event.metricStrength,
         mustResolve: needsResolution,
@@ -337,6 +350,10 @@ const assertions = {
   bpmRangeIsExpressive: maximumBpm - minimumBpm > 34,
   continuousEmotion: maxEmotionStep < 0.09,
   continuousWeather: maxProfileStep < 0.012,
+  corpusPriorLoaded:
+    CLASSICAL_MODEL_META.scoreCount >= 1000 &&
+    CLASSICAL_MODEL_META.melodyNoteCount >= 150000 &&
+    CLASSICAL_MODEL_META.accompanimentNoteCount >= 900000,
   counterpointIndependence: counterpointIndependence > 0.72,
   expressiveTimingIsBounded: maxExpressiveOffsetMs < 150,
   gridIntegrity: maxGridUnitError < 1e-9,
@@ -368,6 +385,7 @@ const report = {
   averagePivotCommonTones: Number(averagePivotCommonTones.toFixed(3)),
   averageVoiceMovement: Number(averageVoiceMovement.toFixed(3)),
   bpmRange: [Number(minimumBpm.toFixed(2)), Number(maximumBpm.toFixed(2))],
+  classicalCorpus: CLASSICAL_MODEL_META,
   chordsGenerated: chordCount,
   counterpointIndependence: Number(counterpointIndependence.toFixed(4)),
   hoursSimulated: HOURS,
