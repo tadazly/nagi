@@ -104,9 +104,9 @@ type TransportState = {
   tension: number;
 };
 
-const PAD_PARTIALS = new Float32Array([0, 1, 0.22, 0.085, 0.032, 0.014, 0.006]);
-const BELL_PARTIALS = new Float32Array([0, 1, 0.3, 0.12, 0.052, 0.022, 0.009]);
-const AIR_PARTIALS = new Float32Array([0, 1, 0.19, 0.075, 0.032, 0.013]);
+const PAD_PARTIALS = new Float32Array([0, 1, 0.16, 0.045, 0.012, 0.004]);
+const BELL_PARTIALS = new Float32Array([0, 1, 0.19, 0.058, 0.018, 0.005]);
+const AIR_PARTIALS = new Float32Array([0, 1, 0.12, 0.032, 0.008]);
 const SCHEDULER_INTERVAL_MS = 120;
 const SCHEDULE_HORIZON_SECONDS = 3.2;
 
@@ -185,7 +185,7 @@ export class NagiAudioEngine {
   private counterNeedsResolution = false;
   private leadMotif: MotifDNA;
   private counterMotif: MotifDNA;
-  private volume = 0.72;
+  private volume = 0.62;
   private wet?: GainNode;
 
   constructor(seed: string, options: EngineOptions = {}) {
@@ -235,15 +235,29 @@ export class NagiAudioEngine {
     this.effectsBus = context.createGain();
     this.filter = context.createBiquadFilter();
     this.filter.type = 'lowpass';
-    this.filter.frequency.value = 7200;
-    this.filter.Q.value = 0.36;
+    this.filter.frequency.value = 5600;
+    this.filter.Q.value = 0.2;
+
+    const rumbleFilter = context.createBiquadFilter();
+    rumbleFilter.type = 'highpass';
+    rumbleFilter.frequency.value = 42;
+    rumbleFilter.Q.value = 0.5;
+    const warmthShelf = context.createBiquadFilter();
+    warmthShelf.type = 'lowshelf';
+    warmthShelf.frequency.value = 180;
+    warmthShelf.gain.value = 1.2;
+    const presenceDip = context.createBiquadFilter();
+    presenceDip.type = 'peaking';
+    presenceDip.frequency.value = 2850;
+    presenceDip.Q.value = 0.72;
+    presenceDip.gain.value = -2.4;
 
     const dry = context.createGain();
-    dry.gain.value = 0.82;
+    dry.gain.value = 0.88;
     const convolver = context.createConvolver();
-    convolver.buffer = this.createImpulse(context, 7.2);
+    convolver.buffer = this.createImpulse(context, 4.6);
     this.wet = context.createGain();
-    this.wet.gain.value = 0.34;
+    this.wet.gain.value = 0.22;
 
     const delayA = context.createDelay(2);
     const delayB = context.createDelay(2);
@@ -251,22 +265,22 @@ export class NagiAudioEngine {
     delayB.delayTime.value = 0.61;
     const delayLevelA = context.createGain();
     const delayLevelB = context.createGain();
-    delayLevelA.gain.value = 0.12;
-    delayLevelB.gain.value = 0.09;
+    delayLevelA.gain.value = 0.07;
+    delayLevelB.gain.value = 0.05;
     const delayPanA = context.createStereoPanner();
     const delayPanB = context.createStereoPanner();
     delayPanA.pan.value = -0.62;
     delayPanB.pan.value = 0.66;
 
     this.compressor = context.createDynamicsCompressor();
-    this.compressor.threshold.value = -24;
-    this.compressor.knee.value = 20;
-    this.compressor.ratio.value = 3;
-    this.compressor.attack.value = 0.11;
-    this.compressor.release.value = 1.15;
+    this.compressor.threshold.value = -20;
+    this.compressor.knee.value = 24;
+    this.compressor.ratio.value = 2;
+    this.compressor.attack.value = 0.16;
+    this.compressor.release.value = 1.4;
     this.globalPanner = context.createStereoPanner();
     const makeup = context.createGain();
-    makeup.gain.value = 2.8;
+    makeup.gain.value = 1.85;
 
     this.master = context.createGain();
     this.master.gain.value = 0;
@@ -283,12 +297,15 @@ export class NagiAudioEngine {
     delayB.connect(delayLevelB);
     delayLevelA.connect(delayPanA);
     delayLevelB.connect(delayPanB);
-    delayPanA.connect(this.compressor);
-    delayPanB.connect(this.compressor);
-    this.sourceBus.connect(this.filter);
-    this.filter.connect(dry);
+    delayPanA.connect(this.sourceBus);
+    delayPanB.connect(this.sourceBus);
+    this.sourceBus.connect(rumbleFilter);
+    rumbleFilter.connect(warmthShelf);
+    warmthShelf.connect(this.filter);
+    this.filter.connect(presenceDip);
+    presenceDip.connect(dry);
     dry.connect(this.compressor);
-    this.filter.connect(convolver);
+    presenceDip.connect(convolver);
     convolver.connect(this.wet);
     this.wet.connect(this.compressor);
     this.compressor.connect(makeup);
@@ -539,7 +556,7 @@ export class NagiAudioEngine {
     while (this.nextFxAt < horizon) {
       const effectTime = this.snapToSubdivision(this.nextFxAt);
       if (this.trackedSources.size < 40) this.scheduleAtmosphere(effectTime, profile);
-      this.nextFxAt += this.random.between(8, 19) * (1.18 - profile.density * 0.32);
+      this.nextFxAt += this.random.between(13, 28) * (1.16 - profile.density * 0.26);
     }
 
     this.transportTimeline = this.transportTimeline.filter(
@@ -668,24 +685,24 @@ export class NagiAudioEngine {
 
   private updateMix(profile: WeatherProfile, now: number) {
     if (!this.filter || !this.wet || !this.globalPanner) return;
-    const pointerBrightness = (1 - this.interactionY) * 2300;
-    const emotionalBrightness = this.currentValence * 1300 + this.currentArousal * 900;
+    const pointerBrightness = (1 - this.interactionY) * 850;
+    const emotionalBrightness = this.currentValence * 520 + this.currentArousal * 420;
     const cutoff =
-      3300 +
-      profile.brightness * 4100 +
+      3100 +
+      profile.brightness * 2700 +
       emotionalBrightness +
       pointerBrightness +
-      this.interactionEnergy * 1600;
-    this.filter.frequency.setTargetAtTime(cutoff, now, 0.7);
+      this.interactionEnergy * 520;
+    this.filter.frequency.setTargetAtTime(cutoff, now, 1.2);
     this.wet.gain.setTargetAtTime(
-      0.2 +
-        profile.space * 0.28 +
-        (1 - this.currentArousal) * 0.08 +
-        this.interactionY * 0.06,
+      0.15 +
+        profile.space * 0.17 +
+        (1 - this.currentArousal) * 0.035 +
+        this.interactionY * 0.02,
       now,
-      1.8,
+      2.4,
     );
-    this.globalPanner.pan.setTargetAtTime((this.interactionX - 0.5) * 0.24, now, 0.32);
+    this.globalPanner.pan.setTargetAtTime((this.interactionX - 0.5) * 0.16, now, 0.45);
   }
 
   private scheduleHarmony(start: number, opening: boolean) {
@@ -741,6 +758,10 @@ export class NagiAudioEngine {
       this.chordDegree,
       this.currentVoicing,
     );
+    const phraseProgress =
+      (this.phraseBar % sceneForChord.phraseBars) /
+      Math.max(1, sceneForChord.phraseBars);
+    const bedBreath = 0.78 + Math.abs(Math.cos(phraseProgress * Math.PI)) * 0.22;
 
     this.transportTimeline.push({
       chordDegree: this.chordDegree,
@@ -756,17 +777,25 @@ export class NagiAudioEngine {
     });
 
     this.currentVoicing.forEach((midi, index) => {
-      this.schedulePadVoice(start, duration, midi, index, opening, profile);
+      this.schedulePadVoice(start, duration, midi, index, opening, profile, bedBreath);
     });
     const bassMidi = chordRootMidi(sceneForChord, this.chordDegree);
-    for (let bar = 0; bar < spanBars; bar += 1) {
+    this.scheduleBass(
+      start,
+      Math.min(duration * 0.72, barSeconds * 1.3),
+      bassMidi,
+      opening,
+      profile,
+      bedBreath,
+    );
+    if (spanBars >= 3 && this.random.next() < 0.32) {
       this.scheduleBass(
-        start + bar * barSeconds,
-        barSeconds * 0.9,
+        start + (spanBars - 1) * barSeconds,
+        barSeconds * 0.58,
         bassMidi,
-        opening && bar === 0,
+        false,
         profile,
-        bar === 0 ? 1 : 0.78,
+        bedBreath * 0.64,
       );
     }
     this.scheduleMelodicVoices(
@@ -790,20 +819,21 @@ export class NagiAudioEngine {
     index: number,
     opening: boolean,
     profile: WeatherProfile,
+    bedBreath: number,
   ) {
     if (!this.context || !this.sourceBus || !this.padWave) return;
     const context = this.context;
     const oscillator = context.createOscillator();
     oscillator.setPeriodicWave(this.padWave);
     oscillator.frequency.setValueAtTime(midiToFrequency(midi), start);
-    oscillator.detune.setValueAtTime(this.random.between(-3.8, 3.8), start);
-    oscillator.detune.linearRampToValueAtTime(this.random.between(-4.5, 4.5), start + duration);
+    oscillator.detune.setValueAtTime(this.random.between(-1.25, 1.25), start);
+    oscillator.detune.linearRampToValueAtTime(this.random.between(-1.6, 1.6), start + duration);
 
     const filter = context.createBiquadFilter();
     filter.type = 'lowpass';
     filter.frequency.value =
-      720 + profile.brightness * 1900 + this.currentArousal * 480 + index * 105;
-    filter.Q.value = 0.32 + profile.warmth * 0.32;
+      780 + profile.brightness * 1420 + this.currentArousal * 320 + index * 85;
+    filter.Q.value = 0.2 + profile.warmth * 0.18;
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
     const spread = [-0.78, 0.5, -0.22, 0.76, 0.16][index] ?? 0;
@@ -811,13 +841,17 @@ export class NagiAudioEngine {
 
     const attack = opening
       ? 0.16 + index * 0.035
-      : Math.min(2.4, duration * (0.28 - this.currentArousal * 0.1));
-    const release = Math.min(3.4, duration * 0.42);
-    const end = start + duration + release;
-    const peak = (opening ? 0.0185 : 0.0138) * (0.82 + profile.density * 0.34);
+      : Math.min(3.1, duration * (0.25 - this.currentArousal * 0.07));
+    const sustainDuration = duration * (0.84 + bedBreath * 0.1);
+    const release = Math.min(2.2, Math.max(0.75, duration * 0.2));
+    const end = start + sustainDuration + release;
+    const peak =
+      (opening ? 0.017 : 0.0125) *
+      (0.86 + profile.density * 0.24) *
+      bedBreath;
     envelope.gain.setValueAtTime(0.0001, start);
     envelope.gain.exponentialRampToValueAtTime(peak, start + attack);
-    envelope.gain.setValueAtTime(peak, start + duration);
+    envelope.gain.setValueAtTime(peak, start + sustainDuration);
     envelope.gain.exponentialRampToValueAtTime(0.0001, end);
 
     oscillator.connect(filter);
@@ -847,11 +881,11 @@ export class NagiAudioEngine {
     filter.type = 'lowpass';
     filter.frequency.value = 310 + profile.warmth * 280;
     const envelope = context.createGain();
-    const end = start + duration + 2.4;
-    const peak = (0.024 + profile.warmth * 0.011) * accent;
+    const end = start + duration + 1.25;
+    const peak = (0.017 + profile.warmth * 0.006) * accent;
     envelope.gain.setValueAtTime(0.0001, start);
-    envelope.gain.exponentialRampToValueAtTime(peak, start + (opening ? 0.2 : 0.7));
-    envelope.gain.setValueAtTime(peak * 0.82, start + duration * 0.72);
+    envelope.gain.exponentialRampToValueAtTime(peak, start + (opening ? 0.22 : 0.82));
+    envelope.gain.setValueAtTime(peak * 0.72, start + duration * 0.68);
     envelope.gain.exponentialRampToValueAtTime(0.0001, end);
     oscillator.connect(filter);
     filter.connect(envelope);
@@ -1006,8 +1040,8 @@ export class NagiAudioEngine {
     const filter = context.createBiquadFilter();
     filter.type = 'lowpass';
     filter.frequency.value =
-      (role === 'lead' ? 1800 : 1250) + profile.brightness * (role === 'lead' ? 4100 : 2900);
-    filter.Q.value = role === 'lead' ? 0.5 : 0.38;
+      (role === 'lead' ? 1650 : 1180) + profile.brightness * (role === 'lead' ? 2600 : 1900);
+    filter.Q.value = role === 'lead' ? 0.34 : 0.28;
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
     const spatialAnchor = role === 'lead' ? 0.2 : -0.24;
@@ -1022,8 +1056,8 @@ export class NagiAudioEngine {
       Math.max(rhythmicDuration, tail) * (0.84 + profile.space * 0.24),
     );
     const peakBase = role === 'lead'
-      ? this.random.between(0.021, 0.033)
-      : this.random.between(0.007, 0.014);
+      ? this.random.between(0.019, 0.029)
+      : this.random.between(0.006, 0.011);
     const peak = peakBase * accent * (0.84 + profile.sparkle * 0.22);
     envelope.gain.setValueAtTime(0.0001, start);
     envelope.gain.exponentialRampToValueAtTime(peak, start + (role === 'lead' ? 0.022 : 0.055));
@@ -1051,13 +1085,13 @@ export class NagiAudioEngine {
     oscillator.frequency.exponentialRampToValueAtTime(frequency, start + 0.28);
     const filter = context.createBiquadFilter();
     filter.type = 'bandpass';
-    filter.frequency.value = 900 + (1 - this.interactionY) * 3600;
-    filter.Q.value = 0.72;
+    filter.frequency.value = 760 + (1 - this.interactionY) * 2250;
+    filter.Q.value = 0.48;
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
     panner.pan.value = (this.interactionX - 0.5) * 1.6;
     const duration = 0.85 + energy * 1.45;
-    const peak = 0.004 + energy * 0.012;
+    const peak = 0.003 + energy * 0.008;
     envelope.gain.setValueAtTime(0.0001, start);
     envelope.gain.exponentialRampToValueAtTime(peak, start + 0.025);
     envelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
@@ -1078,14 +1112,14 @@ export class NagiAudioEngine {
     source.buffer = this.noiseBuffer;
     source.playbackRate.value = this.random.between(0.55, 1.08);
     const filter = context.createBiquadFilter();
-    filter.type = this.random.next() < 0.58 ? 'bandpass' : 'highpass';
-    filter.frequency.value = this.random.between(1200, 5100) * (0.72 + profile.brightness * 0.38);
-    filter.Q.value = this.random.between(0.42, 1.4);
+    filter.type = this.random.next() < 0.78 ? 'bandpass' : 'lowpass';
+    filter.frequency.value = this.random.between(620, 2600) * (0.78 + profile.brightness * 0.28);
+    filter.Q.value = this.random.between(0.28, 0.68);
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
     panner.pan.value = this.random.between(-profile.spread, profile.spread);
-    const duration = this.random.between(1.5, 4.1);
-    const peak = this.random.between(0.0014, 0.0038) * (0.72 + profile.sparkle * 0.4);
+    const duration = this.random.between(2.8, 6.2);
+    const peak = this.random.between(0.0007, 0.0019) * (0.76 + profile.sparkle * 0.3);
     envelope.gain.setValueAtTime(0.0001, start);
     envelope.gain.exponentialRampToValueAtTime(peak, start + duration * 0.36);
     envelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
@@ -1115,7 +1149,7 @@ export class NagiAudioEngine {
     const random = new SeededRandom(seedToNumber(this.currentSeed) ^ 0x87c4ad21);
     let smoothed = 0;
     for (let index = 0; index < length; index += 1) {
-      smoothed = smoothed * 0.68 + (random.next() * 2 - 1) * 0.32;
+      smoothed = smoothed * 0.82 + (random.next() * 2 - 1) * 0.18;
       channel[index] = smoothed;
     }
     return buffer;
@@ -1130,8 +1164,8 @@ export class NagiAudioEngine {
       let smoothed = 0;
       for (let index = 0; index < length; index += 1) {
         const progress = index / length;
-        smoothed = smoothed * 0.22 + (random.next() * 2 - 1) * 0.78;
-        channel[index] = smoothed * (1 - progress) ** 3.05;
+        smoothed = smoothed * 0.68 + (random.next() * 2 - 1) * 0.32;
+        channel[index] = smoothed * (1 - progress) ** 3.45;
       }
     }
     return buffer;

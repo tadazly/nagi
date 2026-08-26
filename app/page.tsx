@@ -76,7 +76,7 @@ export default function Home() {
   });
   const [started, setStarted] = useState(false);
   const [starting, setStarting] = useState(false);
-  const [volume, setVolume] = useState(0.72);
+  const [volume, setVolume] = useState(0.62);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {

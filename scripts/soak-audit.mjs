@@ -8,6 +8,8 @@ import {
   chooseNeighborScene,
   chooseNextDegree,
   clamp,
+  degreeTension,
+  degreeTriadComfort,
   findPivotDegree,
   interpolateProfile,
   isChordTone,
@@ -110,7 +112,15 @@ let motifTargetHits = 0;
 let motifTargetSamples = 0;
 let totalMelodyRoughness = 0;
 let melodyRoughnessSamples = 0;
+let totalBackgroundRoughness = 0;
+let backgroundRoughnessSamples = 0;
 let minimumBassSeparation = Infinity;
+let minimumBedBreath = Infinity;
+let maximumBedBreath = -Infinity;
+let darkModeChords = 0;
+let highTensionChords = 0;
+let triadChords = 0;
+let unstableTriadChords = 0;
 let maxGridUnitError = 0;
 let maxExpressiveOffsetMs = 0;
 let maxTransportDriftMs = 0;
@@ -128,6 +138,12 @@ const keys = new Set();
 const meters = new Set();
 const progressionWindows = new Set();
 const recentProgression = [];
+const darkModes = new Set([
+  'phrygian',
+  'harmonic-minor',
+  'dorian-sharp-four',
+  'neapolitan-major',
+]);
 
 while (now < END_SECONDS) {
   if (chordsUntilSceneChange <= 0) {
@@ -196,14 +212,31 @@ while (now < END_SECONDS) {
   }
   const bass = chordRootMidi(sceneForChord, chordDegree);
   minimumBassSeparation = Math.min(minimumBassSeparation, Math.min(...voicing) - bass);
-  voicing.forEach(() => intervals.push([now, now + duration + 3.4]));
-  for (let bar = 0; bar < spanBars; bar += 1) {
-    const bassStart = now + bar * meter.beatsPerBar * beatSeconds;
-    intervals.push([
-      bassStart,
-      bassStart + meter.beatsPerBar * beatSeconds * 0.9 + 2.4,
-    ]);
+  const phraseProgress =
+    (phraseBar % sceneForChord.phraseBars) / Math.max(1, sceneForChord.phraseBars);
+  const bedBreath = 0.78 + Math.abs(Math.cos(phraseProgress * Math.PI)) * 0.22;
+  minimumBedBreath = Math.min(minimumBedBreath, bedBreath);
+  maximumBedBreath = Math.max(maximumBedBreath, bedBreath);
+  const padTail = Math.min(2.2, Math.max(0.75, duration * 0.2));
+  voicing.forEach(() =>
+    intervals.push([now, now + duration * (0.84 + bedBreath * 0.1) + padTail]),
+  );
+  const bassDuration = Math.min(duration * 0.72, meter.beatsPerBar * beatSeconds * 1.3);
+  intervals.push([now, now + bassDuration + 1.25]);
+  if (spanBars >= 3 && random.next() < 0.32) {
+    const bassStart = now + (spanBars - 1) * meter.beatsPerBar * beatSeconds;
+    intervals.push([bassStart, bassStart + meter.beatsPerBar * beatSeconds * 0.58 + 1.25]);
   }
+  for (let first = 0; first < voicing.length; first += 1) {
+    for (let second = first + 1; second < voicing.length; second += 1) {
+      totalBackgroundRoughness += sensoryRoughness(voicing[first], voicing[second]);
+      backgroundRoughnessSamples += 1;
+    }
+  }
+  if (voicing.length === 3) triadChords += 1;
+  if (degreeTriadComfort(sceneForChord, chordDegree) < 0.5) unstableTriadChords += 1;
+  if (darkModes.has(MODES[sceneForChord.modeIndex].id)) darkModeChords += 1;
+  if (degreeTension(chordDegree) > 0.6) highTensionChords += 1;
 
   const leadEvents = planMotifPhrase(
     sceneForChord,
@@ -344,9 +377,17 @@ const counterpointIndependence = independentPatternPairs / Math.max(1, patternPa
 const averagePivotCommonTones = sharedPivotTones / Math.max(1, sceneChanges);
 const motifTargetRate = motifTargetHits / Math.max(1, motifTargetSamples);
 const averageMelodyRoughness = totalMelodyRoughness / Math.max(1, melodyRoughnessSamples);
+const averageBackgroundRoughness =
+  totalBackgroundRoughness / Math.max(1, backgroundRoughnessSamples);
+const darkModeShare = darkModeChords / Math.max(1, chordCount);
+const highTensionShare = highTensionChords / Math.max(1, chordCount);
+const triadShare = triadChords / Math.max(1, chordCount);
+const unstableTriadShare = unstableTriadChords / Math.max(1, chordCount);
 
 const assertions = {
   activeSourceCap: maxActiveSources <= 40,
+  backgroundRoughnessIsControlled: averageBackgroundRoughness < 0.12,
+  backgroundUsesBreathingDynamics: minimumBedBreath < 0.83 && maximumBedBreath > 0.99,
   bpmRangeIsExpressive: maximumBpm - minimumBpm > 34,
   continuousEmotion: maxEmotionStep < 0.09,
   continuousWeather: maxProfileStep < 0.012,
@@ -358,19 +399,23 @@ const assertions = {
   expressiveTimingIsBounded: maxExpressiveOffsetMs < 150,
   gridIntegrity: maxGridUnitError < 1e-9,
   immediateOpening: 0.025 < 0.1,
+  darkModesRemainRareColour: darkModeShare < 0.12,
+  highTensionIsNotTheDefault: highTensionShare < 0.16,
   lowRegisterSpacing: minimumBassSeparation >= 7,
   melodicMotionIsSingable:
     averageLeadMovement > 1.4 &&
     averageLeadMovement < 7 &&
     averageCounterMovement < 7,
   meterCoverage: meters.size === METERS.length,
-  modeCoverage: modes.size >= MODES.length - 1,
+  modeCoverage: modes.size >= 8,
   motifIdentitySurvives: motifTargetRate > 0.34 && leadMotif.cycle > 100,
   pivotContinuity: averagePivotCommonTones >= 1.5,
   psychoacousticRoughnessIsControlled: averageMelodyRoughness < 0.42,
   progressionVariety: progressionUniqueness > 0.72,
   resolutionsBehave: resolutionRate > 0.72,
   strongBeatsAreHarmonicallyStable: strongBeatConsonance > 0.78,
+  sustainedHarmonyIsMostlyTriadic: triadShare > 0.92,
+  unstableTriadsRemainPassingColour: unstableTriadShare < 0.055,
   tempoTransitionsAreGradual: maxTempoStep <= 2.600001,
   tonalCoverage: keys.size >= 10,
   transportHasNoCumulativeDrift: maxTransportDriftMs < 1e-6,
@@ -379,6 +424,7 @@ const assertions = {
 
 const report = {
   assertions,
+  averageBackgroundRoughness: Number(averageBackgroundRoughness.toFixed(4)),
   averageCounterMovement: Number(averageCounterMovement.toFixed(3)),
   averageLeadMovement: Number(averageLeadMovement.toFixed(3)),
   averageMelodyRoughness: Number(averageMelodyRoughness.toFixed(4)),
@@ -388,6 +434,7 @@ const report = {
   classicalCorpus: CLASSICAL_MODEL_META,
   chordsGenerated: chordCount,
   counterpointIndependence: Number(counterpointIndependence.toFixed(4)),
+  darkModeShare: Number(darkModeShare.toFixed(4)),
   hoursSimulated: HOURS,
   keysVisited: keys.size,
   leadMotifCycles: leadMotif.cycle,
@@ -399,14 +446,21 @@ const report = {
   maxTempoStep: Number(maxTempoStep.toFixed(4)),
   maxTransportDriftMs,
   maxWeatherDeltaPerSecond: Number(maxProfileStep.toFixed(6)),
+  highTensionShare: Number(highTensionShare.toFixed(4)),
   metersVisited: meters.size,
   minimumBassSeparation,
+  bedBreathRange: [
+    Number(minimumBedBreath.toFixed(4)),
+    Number(maximumBedBreath.toFixed(4)),
+  ],
   modesVisited: modes.size,
   motifTargetRate: Number(motifTargetRate.toFixed(4)),
   progressionWindowUniqueness: Number(progressionUniqueness.toFixed(4)),
   resolutionRate: Number(resolutionRate.toFixed(4)),
   seedChanges,
   strongBeatConsonance: Number(strongBeatConsonance.toFixed(4)),
+  triadShare: Number(triadShare.toFixed(4)),
+  unstableTriadShare: Number(unstableTriadShare.toFixed(4)),
 };
 
 console.log(JSON.stringify(report, null, 2));

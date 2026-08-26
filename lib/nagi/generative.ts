@@ -94,6 +94,24 @@ export const MODES: readonly ModeDefinition[] = [
   { id: 'neapolitan-major', name: 'Neapolitan major', intervals: [0, 1, 3, 5, 7, 9, 11], valence: 0.36 },
 ] as const;
 
+// Long-form ambient listening benefits from variety without making every mode
+// equally likely. The lower values keep strongly tense modes as rare weather
+// colours rather than the default harmonic climate.
+const MODE_COMFORT_WEIGHT = [
+  1,
+  0.9,
+  0.92,
+  0.96,
+  0.72,
+  0.12,
+  0.2,
+  0.54,
+  0.62,
+  0.46,
+  0.22,
+  0.1,
+] as const;
+
 export const METERS: readonly MeterDefinition[] = [
   {
     id: 'common',
@@ -233,15 +251,15 @@ const pitchClass = (midi: number) => ((midi % 12) + 12) % 12;
 export const profileFromSeed = (seed: string): WeatherProfile => {
   const random = new SeededRandom(seed);
   return {
-    brightness: random.between(0.3, 0.76),
-    density: random.between(0.38, 0.78),
+    brightness: random.between(0.24, 0.66),
+    density: random.between(0.3, 0.68),
     depth: random.between(0.34, 0.9),
     flow: random.between(0.18, 0.86),
     harmonicHue: random.between(0.16, 0.86),
     motion: random.between(0.22, 0.72),
     shape: random.between(0.08, 0.94),
-    space: random.between(0.48, 0.9),
-    sparkle: random.between(0.16, 0.82),
+    space: random.between(0.38, 0.76),
+    sparkle: random.between(0.1, 0.62),
     spread: random.between(0.48, 0.92),
     warmth: random.between(0.3, 0.78),
   };
@@ -252,18 +270,22 @@ export const tempoFromArousal = (arousal: number, valence = 0.5) =>
 
 const chooseModeForValence = (valence: number, random: SeededRandom) =>
   weightedIndex(
-    MODES.map((mode) => 0.08 + Math.exp(-Math.abs(mode.valence - valence) * 5.2)),
+    MODES.map(
+      (mode, index) =>
+        MODE_COMFORT_WEIGHT[index] *
+        (0.04 + Math.exp(-Math.abs(mode.valence - valence) * 6.2)),
+    ),
     random,
   );
 
 export const sceneFromSeed = (seed: string): HarmonicScene => {
   const random = new SeededRandom(seedToNumber(seed) ^ 0xb5297a4d);
-  const arousal = random.between(0.08, 0.9);
-  const valence = random.between(0.16, 0.88);
+  const arousal = random.between(0.06, 0.8);
+  const valence = random.between(0.32, 0.88);
   return {
     arousal,
-    cadenceBias: random.between(0.18, 0.68),
-    chordColor: random.between(0.2, 0.92),
+    cadenceBias: random.between(0.3, 0.72),
+    chordColor: random.between(0.16, 0.68),
     groove: random.between(0.045, 0.16),
     meterIndex: weightedIndex([0.46, 0.16, 0.3, 0.08], random),
     modeIndex: chooseModeForValence(valence, random),
@@ -272,7 +294,7 @@ export const sceneFromSeed = (seed: string): HarmonicScene => {
       ? random.pick([12, 16, 16] as const)
       : random.pick([8, 10, 12, 16] as const),
     tempo: tempoFromArousal(arousal, valence),
-    tension: random.between(0.2, 0.66),
+    tension: random.between(0.12, 0.54),
     tonic: Math.floor(random.next() * 12),
     valence,
   };
@@ -331,6 +353,20 @@ export const harmonicFunctionForDegree = (
 export const degreeTension = (degree: number) =>
   DEGREE_TENSION[wrapDegree(degree, DEGREE_TENSION.length)];
 
+export const degreeTriadComfort = (scene: HarmonicScene, degree: number) => {
+  const mode = MODES[scene.modeIndex].intervals;
+  const pitchAt = (scaleDegree: number) =>
+    mode[wrapDegree(scaleDegree, mode.length)] +
+    Math.floor(scaleDegree / mode.length) * 12;
+  const root = pitchAt(degree);
+  const third = pitchAt(degree + 2) - root;
+  const fifth = pitchAt(degree + 4) - root;
+  if ((third === 3 || third === 4) && fifth === 7) return 1;
+  if ((third === 2 || third === 5) && fifth === 7) return 0.62;
+  if (fifth === 6 || fifth === 8) return 0.1;
+  return 0.38;
+};
+
 export const chooseNextDegree = (
   currentDegree: number,
   scene: HarmonicScene,
@@ -343,6 +379,7 @@ export const chooseNextDegree = (
   const weights = Array.from({ length: modeLength }, (_, degree) => {
     const nextFunction = harmonicFunctionForDegree(scene, degree);
     let weight = FUNCTION_TRANSITIONS[currentFunction][nextFunction];
+    weight *= 0.12 + degreeTriadComfort(scene, degree) * 0.88;
     const tensionDistance = Math.abs(degreeTension(degree) - scene.tension);
     weight *= 1.2 - tensionDistance * 0.62;
     if (degree === wrapDegree(currentDegree, modeLength)) weight *= 0.22;
@@ -351,6 +388,10 @@ export const chooseNextDegree = (
     } else if (nextFunction === 'dominant') {
       weight *= 1 + (1 - cadenceWindow) * scene.cadenceBias * 0.5;
     }
+    if (degreeTension(degree) > 0.6) {
+      weight *= 0.12 + scene.tension * 0.32;
+    }
+    if (nextFunction === 'color') weight *= 0.58;
     return Math.max(0.001, weight);
   });
   return weightedIndex(weights, random);
@@ -364,13 +405,10 @@ export const chordPitchClasses = (
   const mode = MODES[scene.modeIndex].intervals;
   const harmonicFunction = harmonicFunctionForDegree(scene, degree);
   let offsets: readonly number[] = [0, 2, 4];
-  if (color > 0.7) {
-    offsets = harmonicFunction === 'tonic' ? [0, 2, 4, 5] : [0, 2, 4, 6];
-  } else if (color > 0.38) {
-    offsets =
-      harmonicFunction === 'tonic'
-        ? [0, 2, 4, 5]
-        : [0, 2, 4, 6];
+  if (color > 0.76 && harmonicFunction === 'tonic') {
+    offsets = [0, 2, 4, 5];
+  } else if (color > 0.86 && harmonicFunction === 'dominant') {
+    offsets = [0, 2, 4, 6];
   }
   const classes = offsets.map((offset) => {
     const scaleIndex = degree + offset;
@@ -383,21 +421,21 @@ export const chordRootMidi = (scene: HarmonicScene, degree: number) => {
   const mode = MODES[scene.modeIndex].intervals;
   const rootClass = pitchClass(scene.tonic + mode[wrapDegree(degree, mode.length)]);
   let midi = 36 + rootClass;
-  while (midi > 45) midi -= 12;
-  while (midi < 34) midi += 12;
+  while (midi < 40) midi += 12;
   return midi;
 };
 
 const voicingCost = (notes: readonly number[], previous: readonly number[]) => {
   const center = notes.reduce((sum, note) => sum + note, 0) / notes.length;
-  let cost = Math.abs(center - 65) * 0.08;
+  let cost = Math.abs(center - 69) * 0.1;
   for (let index = 1; index < notes.length; index += 1) {
     const gap = notes[index] - notes[index - 1];
-    if (gap < 3) cost += (3 - gap) * 3.2;
+    if (gap < 5) cost += (5 - gap) * 4.2;
+    if (notes[index - 1] < 62 && gap < 7) cost += (7 - gap) * 3.4;
     if (gap > 12) cost += (gap - 12) * 0.18;
     cost += sensoryRoughness(notes[index - 1], notes[index]) * 2.6;
   }
-  if (notes[notes.length - 1] - notes[0] > 30) cost += 2.5;
+  if (notes[notes.length - 1] - notes[0] > 27) cost += 2.8;
   if (previous.length === 0) return cost;
   const symmetricMotion =
     notes.reduce(
@@ -422,7 +460,7 @@ export const voiceLeadChord = (
   const classes = chordPitchClasses(scene, degree);
   const candidates = classes.map((noteClass) => {
     const values: number[] = [];
-    for (let midi = 52; midi <= 82; midi += 1) {
+    for (let midi = 58; midi <= 82; midi += 1) {
       if (pitchClass(midi) === noteClass) values.push(midi);
     }
     return values;
@@ -454,8 +492,8 @@ export const chooseNeighborScene = (
   random: SeededRandom,
 ): HarmonicScene => {
   const source = scenePitchClasses(scene);
-  const arousal = clamp(scene.arousal + random.between(-0.2, 0.2), 0.06, 0.94);
-  const valence = clamp(scene.valence + random.between(-0.17, 0.17), 0.12, 0.9);
+  const arousal = clamp(scene.arousal + random.between(-0.16, 0.16), 0.06, 0.82);
+  const valence = clamp(scene.valence + random.between(-0.13, 0.13), 0.3, 0.9);
   const keyMoves = [0, 0, 0, 7, 5, 2, 10, 9, 3] as const;
   const candidates: Array<{ modeIndex: number; score: number; tonic: number }> = [];
   for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -482,8 +520,8 @@ export const chooseNeighborScene = (
     : weightedIndex([0.46, 0.16, 0.3, 0.08], random);
   return {
     arousal,
-    cadenceBias: random.between(0.18, 0.7),
-    chordColor: clamp(scene.chordColor + random.between(-0.2, 0.2), 0.2, 0.94),
+    cadenceBias: random.between(0.3, 0.74),
+    chordColor: clamp(scene.chordColor + random.between(-0.14, 0.14), 0.14, 0.72),
     groove: clamp(scene.groove + random.between(-0.035, 0.035), 0.035, 0.18),
     meterIndex,
     modeIndex: neighbor.modeIndex,
@@ -494,7 +532,7 @@ export const chooseNeighborScene = (
         ? random.pick([12, 16, 16] as const)
         : random.pick([8, 10, 12, 16] as const),
     tempo: tempoFromArousal(arousal, valence),
-    tension: clamp(scene.tension + random.between(-0.18, 0.18), 0.16, 0.72),
+    tension: clamp(scene.tension + random.between(-0.13, 0.13), 0.1, 0.56),
     tonic: neighbor.tonic,
     valence,
   };
@@ -520,7 +558,8 @@ export const findPivotDegree = (
       ),
     );
     const tonicBonus = degree === 0 ? 0.18 : 0;
-    const score = shared * 1.4 - motion * 0.08 + tonicBonus;
+    const comfort = degreeTriadComfort(to, degree);
+    const score = shared * 1.4 - motion * 0.08 + tonicBonus + comfort * 0.52;
     if (score > bestScore) {
       bestScore = score;
       bestDegree = degree;
