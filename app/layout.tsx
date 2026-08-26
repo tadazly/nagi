@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000',
+    process.env.NEXT_PUBLIC_SITE_URL ?? 'https://nagi-ambient.kuyami.chatgpt.site',
   ),
   title: 'NAGI — Generative Ambient Music',
   description: 'An endless, slowly evolving space of sound and light.',
