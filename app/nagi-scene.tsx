@@ -58,6 +58,7 @@ uniform float uSeed;
 uniform float uShape;
 uniform vec4 uAudio;
 uniform vec4 uPointer;
+uniform vec3 uTransport;
 varying vec3 vNormalWorld;
 varying vec3 vPosition;
 varying vec3 vWorldPosition;
@@ -78,7 +79,7 @@ void main() {
   float interaction = max(uAudio.w, uPointer.z);
   float cursorFacing = max(dot(normalize(position.xy + vec2(0.0001)), normalize(uPointer.xy + vec2(0.0001))), 0.0);
   float displacement = field * mix(0.12, 0.27, uShape) + fine * (0.45 + uShape);
-  displacement += uAudio.x * 0.08 + interaction * cursorFacing * 0.055;
+  displacement += uAudio.x * 0.08 + uTransport.x * 0.014 + interaction * cursorFacing * 0.055;
   transformed += vec3(
     sin(position.y * 2.7 + uTime * 0.13),
     sin(position.z * 3.1 - uTime * 0.11),
@@ -102,6 +103,7 @@ uniform float uTime;
 uniform float uSeed;
 uniform float uSparkle;
 uniform vec4 uAudio;
+uniform vec3 uTransport;
 uniform vec3 uColorA;
 uniform vec3 uColorB;
 uniform vec3 uColorC;
@@ -119,12 +121,14 @@ void main() {
   float opposite = max(dot(normal, normalize(vec3(0.72, -0.35, 0.4))), 0.0);
   float band = 0.5 + 0.5 * sin(vPosition.y * (7.0 + uSparkle * 9.0) + uTime * 0.18 + uSeed * 23.0);
   float caustic = pow(band, 7.0) * (0.08 + uSparkle * 0.24);
-  float interference = 0.5 + 0.5 * sin((vPosition.x - vPosition.z) * 9.0 - uTime * 0.12);
+  float phraseWave = sin(uTransport.y * 6.2831853);
+  float interference = 0.5 + 0.5 * sin((vPosition.x - vPosition.z) * 9.0 - uTime * 0.12 + phraseWave * 0.24);
   vec3 color = mix(uColorA, uColorB, diffuse * 0.64 + opposite * 0.2 + band * 0.15);
   color = mix(color, uColorC, fresnel * (0.58 + uSparkle * 0.25));
   color += uColorC * (caustic + pow(max(diffuse, 0.0), 10.0) * 0.4);
   color += mix(uColorA, uColorC, interference) * vDisplacement * 0.45;
-  color += uColorC * (uAudio.y * 0.11 + uAudio.z * fresnel * 0.22);
+  color += uColorC * (uAudio.y * 0.11 + uAudio.z * fresnel * 0.22 + uTransport.x * 0.018);
+  color = mix(color, color * vec3(1.04, 0.98, 1.08), uTransport.z * 0.08);
   float alpha = 0.9 + fresnel * 0.1;
   gl_FragColor = vec4(max(color, 0.0) * 0.72, alpha);
 }
@@ -188,6 +192,7 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
       uShape: { value: 0.5 },
       uSparkle: { value: 0.5 },
       uTime: { value: 0 },
+      uTransport: { value: new THREE.Vector3() },
     }),
     [],
   );
@@ -233,6 +238,7 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
       1 - Math.exp(-delta * 0.8),
     );
     material.uniforms.uAudio.value.set(audio.bass, audio.mid, audio.treble, audio.interaction);
+    material.uniforms.uTransport.value.set(audio.pulse, audio.phrase, audio.tension);
     material.uniforms.uPointer.value.set(
       pointer.x * 2 - 1,
       1 - pointer.y * 2,
@@ -255,7 +261,9 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
       0.92 + seedSnapshot.profile.depth * 0.12,
     );
     core.scale.lerp(targetScale, 1 - Math.exp(-delta * 0.55));
-    shell.scale.copy(core.scale).multiplyScalar(1.035 + audio.bass * 0.035);
+    shell.scale
+      .copy(core.scale)
+      .multiplyScalar(1.035 + audio.bass * 0.035 + audio.pulse * 0.008);
     core.rotation.y += delta * (0.035 + seedSnapshot.profile.motion * 0.05);
     core.rotation.x = THREE.MathUtils.lerp(core.rotation.x, (pointer.y - 0.5) * 0.16, 0.025);
     core.rotation.z = THREE.MathUtils.lerp(core.rotation.z, (pointer.x - 0.5) * -0.12, 0.025);
@@ -388,6 +396,9 @@ function SceneController({
     pointer.targetEnergy *= pointer.down > 0 ? 0.965 : 0.9;
     audioRef.current = engineRef.current?.readAudioBands() ?? {
       bass: 0.025,
+      phrase: 0,
+      pulse: 0,
+      tension: 0,
       mid: 0.018,
       treble: 0.008,
       interaction: 0,
@@ -489,7 +500,15 @@ function PostEffects({ seedSnapshot }: { seedSnapshot: SeedSnapshot }) {
 }
 
 export function NagiScene(props: NagiSceneProps) {
-  const audioRef = useRef<AudioBands>({ bass: 0, mid: 0, treble: 0, interaction: 0 });
+  const audioRef = useRef<AudioBands>({
+    bass: 0,
+    mid: 0,
+    treble: 0,
+    interaction: 0,
+    phrase: 0,
+    pulse: 0,
+    tension: 0,
+  });
   const [quality, setQuality] = useState(() =>
     typeof window !== 'undefined' && window.innerWidth < 720 ? 1 : 1.45,
   );
