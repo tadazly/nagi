@@ -27,10 +27,12 @@ export type InstrumentId =
 
 export type TimbreRecipe = {
   attack: number;
+  breath?: number;
   brightness: number;
   label: string;
   partials: readonly number[];
   release: number;
+  transient?: number;
   vibratoCents: number;
   vibratoHz: number;
 };
@@ -69,11 +71,13 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
     label: 'celesta',
     partials: [0, 1, 0.34, 0.09, 0.2, 0.035, 0.018, 0.028, 0.012],
     release: 1.28,
+    transient: 0.24,
     vibratoCents: 0.35,
     vibratoHz: 5.1,
   },
   flute: {
     attack: 0.075,
+    breath: 0.3,
     brightness: 0.58,
     label: 'flute',
     partials: [0, 1, 0.17, 0.052, 0.022, 0.011, 0.006, 0.003, 0.002],
@@ -83,6 +87,7 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
   },
   clarinet: {
     attack: 0.052,
+    breath: 0.12,
     brightness: 0.48,
     label: 'clarinet',
     partials: [0, 1, 0.045, 0.31, 0.026, 0.13, 0.014, 0.065, 0.009],
@@ -92,6 +97,7 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
   },
   violin: {
     attack: 0.115,
+    breath: 0.08,
     brightness: 0.72,
     label: 'violin',
     partials: [0, 1, 0.72, 0.48, 0.31, 0.21, 0.15, 0.1, 0.065],
@@ -101,6 +107,7 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
   },
   oboe: {
     attack: 0.058,
+    breath: 0.18,
     brightness: 0.76,
     label: 'oboe',
     partials: [0, 1, 0.61, 0.33, 0.24, 0.15, 0.095, 0.058, 0.034],
@@ -110,6 +117,7 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
   },
   strings: {
     attack: 0.46,
+    breath: 0.07,
     brightness: 0.57,
     label: 'string ensemble',
     partials: [0, 1, 0.57, 0.31, 0.18, 0.105, 0.061, 0.035, 0.02],
@@ -119,6 +127,7 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
   },
   choir: {
     attack: 0.62,
+    breath: 0.16,
     brightness: 0.38,
     label: 'wordless choir',
     partials: [0, 1, 0.21, 0.105, 0.051, 0.025, 0.012, 0.006, 0.003],
@@ -137,6 +146,7 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
   },
   'soft-horns': {
     attack: 0.34,
+    breath: 0.1,
     brightness: 0.5,
     label: 'soft horns',
     partials: [0, 1, 0.38, 0.19, 0.095, 0.047, 0.024, 0.012, 0.006],
@@ -146,6 +156,7 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
   },
   cello: {
     attack: 0.16,
+    breath: 0.05,
     brightness: 0.44,
     label: 'cello',
     partials: [0, 1, 0.49, 0.25, 0.13, 0.07, 0.038, 0.021, 0.012],
@@ -164,6 +175,7 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
   },
   bassoon: {
     attack: 0.09,
+    breath: 0.1,
     brightness: 0.51,
     label: 'bassoon',
     partials: [0, 1, 0.17, 0.29, 0.09, 0.12, 0.038, 0.056, 0.02],
@@ -186,6 +198,7 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
     label: 'harp',
     partials: [0, 1, 0.48, 0.25, 0.14, 0.08, 0.045, 0.026, 0.015],
     release: 0.92,
+    transient: 0.22,
     vibratoCents: 0.2,
     vibratoHz: 5.0,
   },
@@ -195,6 +208,7 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
     label: 'felt piano',
     partials: [0, 1, 0.4, 0.17, 0.075, 0.035, 0.017, 0.009, 0.004],
     release: 0.72,
+    transient: 0.28,
     vibratoCents: 0.15,
     vibratoHz: 5.0,
   },
@@ -204,6 +218,7 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
     label: 'pizzicato strings',
     partials: [0, 1, 0.58, 0.31, 0.17, 0.095, 0.052, 0.029, 0.016],
     release: 0.38,
+    transient: 0.32,
     vibratoCents: 0.1,
     vibratoHz: 5.0,
   },
@@ -213,6 +228,7 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
     label: 'marimba',
     partials: [0, 1, 0.08, 0.23, 0.035, 0.075, 0.018, 0.032, 0.009],
     release: 0.62,
+    transient: 0.26,
     vibratoCents: 0.1,
     vibratoHz: 5.0,
   },
@@ -287,7 +303,59 @@ export function chooseOrchestration(
     { value: 'marimba', weight: 0.28 + brightJoy * 0.74 + profile.motion * 0.42 + continuityWeight('marimba', current?.accompaniment) },
   ], random);
 
-  return { accompaniment, bass, counter, harmony, lead };
+  const proposal: OrchestrationPlan = {
+    accompaniment,
+    bass,
+    counter,
+    harmony,
+    lead,
+  };
+  if (!current) return proposal;
+
+  // Re-orchestrate like an ensemble handing material between desks: preserve
+  // most of the palette and change at most two roles at a formal boundary.
+  // This prevents a new random draw from sounding like a whole new track.
+  const roles = Object.keys(proposal) as Array<keyof OrchestrationPlan>;
+  const changed = roles.filter((role) => proposal[role] !== current[role]);
+  const budget = stage.id === 'development' || stage.id === 'intensification'
+    ? 2
+    : 1;
+  const roleWeight: Record<keyof OrchestrationPlan, number> = {
+    accompaniment: stage.id === 'release' ? 1.1 : 0.8,
+    bass: stage.id === 'intensification' ? 1.05 : 0.52,
+    counter: stage.id === 'development' ? 1.18 : 0.82,
+    harmony: stage.id === 'intensification' ? 1.3 : 0.7,
+    lead: stage.id === 'return' ? 0.72 : 1,
+  };
+  const selected = new Set<keyof OrchestrationPlan>();
+  const remaining = [...changed];
+  while (selected.size < budget && remaining.length > 0) {
+    const role = weightedPick(
+      remaining.map((candidate) => ({
+        value: candidate,
+        weight: roleWeight[candidate],
+      })),
+      random,
+    );
+    selected.add(role);
+    remaining.splice(remaining.indexOf(role), 1);
+  }
+  const result = { ...current };
+  selected.forEach((role) => {
+    result[role] = proposal[role];
+  });
+  if (result.counter === result.lead) {
+    if (selected.has('counter')) {
+      result.counter = proposal.counter !== result.lead
+        ? proposal.counter
+        : result.lead === 'flute' ? 'clarinet' : 'flute';
+    } else if (selected.has('lead')) {
+      result.lead = proposal.lead !== result.counter
+        ? proposal.lead
+        : result.counter === 'flute' ? 'clarinet' : 'flute';
+    }
+  }
+  return result;
 }
 
 function expression(
@@ -449,10 +517,12 @@ export function interpolateTimbre(
   );
   return {
     attack: lerp(from.attack, to.attack),
+    breath: lerp(from.breath ?? 0, to.breath ?? 0),
     brightness: lerp(from.brightness, to.brightness),
     label: mix < 0.5 ? from.label : to.label,
     partials,
     release: lerp(from.release, to.release),
+    transient: lerp(from.transient ?? 0, to.transient ?? 0),
     vibratoCents: lerp(from.vibratoCents, to.vibratoCents),
     vibratoHz: lerp(from.vibratoHz, to.vibratoHz),
   };

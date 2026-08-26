@@ -10,7 +10,7 @@ import {
   Vignette,
 } from '@react-three/postprocessing';
 import { BlendFunction } from 'postprocessing';
-import { type RefObject, useEffect, useMemo, useRef } from 'react';
+import { type RefObject, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import {
   type AudioBands,
@@ -19,6 +19,7 @@ import {
 import {
   CORE_EMOTIONS,
   seedToNumber,
+  visualVariantFromSeed,
   type EmotionName,
   type SeedSnapshot,
 } from '../lib/nagi/generative';
@@ -139,19 +140,39 @@ void main() {
     mix(0.94, 0.84, arousal),
     auroraWave
   ) * (0.52 + mist * 0.48);
-  float crystal = pow(
-    abs(sin((abs(d.x) + abs(d.y * 1.3) + abs(d.z * 0.8)) * 21.0 + mist * 3.4)),
-    13.0
-  );
+  float crystalSignal = abs(sin(
+    (abs(d.x) + abs(d.y * 1.3) + abs(d.z * 0.8)) * 21.0 + mist * 3.4
+  ));
+  float crystal = smoothstep(0.82, 0.985, crystalSignal);
   float halo = pow(max(0.0, 1.0 - abs(length(d.xy) - 0.72 - mist * 0.12)), 7.0);
   float lagoon = 0.5 + 0.5 * sin((d.x + d.z) * 8.0 + mist * 4.0 - slowTime * 2.0);
-  float rays = pow(0.5 + 0.5 * sin(longitude * 7.0 + mist * 2.0 + slowTime), 8.0);
-  float bloom = pow(max(0.0, sin(longitude * 3.0 + d.y * 5.0 + slowTime * 1.6)), 4.0);
+  float rays = smoothstep(
+    0.68,
+    0.97,
+    0.5 + 0.5 * sin(longitude * 7.0 + mist * 2.0 + slowTime)
+  );
+  float bloom = smoothstep(
+    0.38,
+    0.96,
+    max(0.0, sin(longitude * 3.0 + d.y * 5.0 + slowTime * 1.6))
+  );
   float storm = fbm(d * 8.0 + vec3(-slowTime * 2.0, slowTime, uSeed * 15.0));
-  float lattice = pow(abs(sin((d.x - d.z) * 28.0 + storm * 5.0)), 11.0);
-  float ribbon = pow(0.5 + 0.5 * sin(longitude * 5.0 + d.y * 9.0 + mist * 3.0 + slowTime * 2.0), 5.0);
+  float lattice = smoothstep(
+    0.84,
+    0.985,
+    abs(sin((d.x - d.z) * 28.0 + storm * 5.0))
+  );
+  float ribbon = smoothstep(
+    0.58,
+    0.98,
+    0.5 + 0.5 * sin(longitude * 5.0 + d.y * 9.0 + mist * 3.0 + slowTime * 2.0)
+  );
   float vortex = 0.5 + 0.5 * sin(longitude * 4.0 + length(d.xy) * 13.0 - slowTime * 1.4 + mist * 4.0);
-  float sparkleCells = pow(hash31(floor((d + slowTime * 0.035) * 82.0 + uSeed * 19.0)), 22.0);
+  float sparkleNoise = hash31(floor(d * 82.0 + uSeed * 19.0));
+  float sparkleDrift = 0.72 + 0.28 * sin(
+    slowTime * 7.0 + sparkleNoise * 18.0 + uTransport.y * 6.2831853
+  );
+  float sparkleCells = smoothstep(0.965, 0.997, sparkleNoise) * sparkleDrift;
   vec4 patternsA = vec4(mist * 0.58 + tide * 0.42, halo, lagoon, aurora);
   vec4 patternsB = vec4(rays, bloom, crystal, storm);
   vec4 patternsC = vec4(lattice, ribbon, vortex, sparkleCells);
@@ -161,7 +182,7 @@ void main() {
   color *= 0.48 + field * 0.58 + mist * 0.12;
   color += uColorC * field * (0.08 + valence * 0.13);
   float starNoise = hash31(floor(d * 180.0 + uSeed * 37.0));
-  float stars = pow(starNoise, 62.0);
+  float stars = smoothstep(0.982, 0.999, starNoise);
   float twinkle = 0.5 + 0.5 * sin(uTransport.y * 6.2831853 + starNoise * 21.0);
   float flowingLight = 0.5 + 0.5 * sin(
     longitude * 3.0 + mist * 4.0 + uTransport.z * 6.2831853
@@ -370,11 +391,11 @@ function palette(
   );
 }
 
-function shaderVariantIndex(seed: number) {
-  return Math.floor(Math.abs(Math.sin(seed * 43758.5453)) * 3) % 3;
+function shaderVariantIndex(seed: string) {
+  return visualVariantFromSeed(seed, 3);
 }
 
-function shaderState(emotion: EmotionName, seed: number) {
+function shaderState(emotion: EmotionName, seed: string) {
   const variants = EMOTION_SHADER_TEMPLATES[emotion];
   const variant = shaderVariantIndex(seed);
   const template = variants[variant];
@@ -403,10 +424,8 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
     [],
   );
   const styleTargets = useMemo(() => {
-    const current = seedToNumber(seedSnapshot.currentSeed) / 4294967295;
-    const incoming = seedSnapshot.incomingSeed
-      ? seedToNumber(seedSnapshot.incomingSeed) / 4294967295
-      : current;
+    const current = seedSnapshot.currentSeed;
+    const incoming = seedSnapshot.incomingSeed ?? current;
     return {
       current: shaderState(seedSnapshot.emotion, current),
       incoming: shaderState(
@@ -785,8 +804,7 @@ function SceneController({
       rendererRef.current.maxFrameGapMs,
       Math.min(1000, delta * 1000),
     );
-    const normalizedSeed = seedToNumber(seedSnapshot.currentSeed) / 4294967295;
-    const styleVariant = shaderVariantIndex(normalizedSeed);
+    const styleVariant = shaderVariantIndex(seedSnapshot.currentSeed);
     rendererRef.current.styleVariant =
       CORE_EMOTIONS.indexOf(seedSnapshot.emotion) * 3 + styleVariant;
     rendererRef.current.styleName =
@@ -810,7 +828,7 @@ function SceneController({
     };
     rendererRef.current.barPhase = audioRef.current.barPhase;
     rendererRef.current.beatPhase = audioRef.current.beatPhase;
-    rendererRef.current.pulse = 0;
+    rendererRef.current.pulse = audioRef.current.pulse;
 
     const mobile = state.size.width < 720;
     pointerTarget.set(
@@ -938,10 +956,22 @@ export function NagiScene(props: NagiSceneProps) {
     tension: 0,
     valence: 0.5,
   });
-  const quality = useMemo(
-    () => Math.min(window.devicePixelRatio || 1, window.innerWidth < 720 ? 1 : 1.35),
-    [],
-  );
+  const qualityForViewport = () =>
+    Math.min(window.devicePixelRatio || 1, window.innerWidth < 720 ? 1 : 1.35);
+  const [quality, setQuality] = useState(qualityForViewport);
+
+  useEffect(() => {
+    let frame = 0;
+    const updateQuality = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => setQuality(qualityForViewport()));
+    };
+    window.addEventListener('resize', updateQuality, { passive: true });
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener('resize', updateQuality);
+    };
+  }, []);
 
   return (
     <Canvas

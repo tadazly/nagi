@@ -212,20 +212,13 @@ export default function Home() {
 
   const randomize = useCallback(() => {
     const next = randomSeed();
-    const nextEmotion = initialEmotionFromSeed(next);
     seedRef.current = next;
     if (engineRef.current) {
       engineRef.current.transitionToSeed(next);
-      setSeedSnapshot((snapshot) => ({
-        ...snapshot,
-        incomingEmotion: nextEmotion,
-        incomingSeed: next,
-        transition: Math.max(0.025, snapshot.transition),
-      }));
     } else {
       setSeedSnapshot({
         currentSeed: next,
-        emotion: nextEmotion,
+        emotion: initialEmotionFromSeed(next),
         incomingEmotion: null,
         incomingSeed: null,
         profile: profileFromSeed(next),
@@ -266,10 +259,15 @@ export default function Home() {
     [],
   );
 
-  const incomingProgress = seedSnapshot.incomingSeed
-    ? Math.max(0, Math.min(1, (seedSnapshot.transition + 0.12) / 0.38))
+  const outgoingProgress = seedSnapshot.incomingSeed
+    ? clamp(seedSnapshot.transition / 0.48)
     : 0;
-  const incomingOpacity =
+  const incomingProgress = seedSnapshot.incomingSeed
+    ? clamp((seedSnapshot.transition - 0.52) / 0.48)
+    : 0;
+  const outgoingEase =
+    outgoingProgress * outgoingProgress * (3 - 2 * outgoingProgress);
+  const incomingEase =
     incomingProgress * incomingProgress * (3 - 2 * incomingProgress);
 
   return (
@@ -313,11 +311,24 @@ export default function Home() {
           className="nagi-seed"
           aria-label={`current musical state ${seedSnapshot.emotion} ${seedSnapshot.currentSeed}`}
         >
-          <span style={{ opacity: 1 - incomingOpacity }}>
+          <span
+            style={{
+              filter: `blur(${outgoingEase * 1.8}px)`,
+              opacity: 1 - outgoingEase,
+              transform: `translateY(${-outgoingEase * 0.14}rem)`,
+            }}
+          >
             {seedSnapshot.emotion} {seedSnapshot.currentSeed}
           </span>
           {seedSnapshot.incomingSeed && (
-            <span style={{ opacity: incomingOpacity }} aria-hidden="true">
+            <span
+              style={{
+                filter: `blur(${(1 - incomingEase) * 1.8}px)`,
+                opacity: incomingEase,
+                transform: `translateY(${(1 - incomingEase) * 0.14}rem)`,
+              }}
+              aria-hidden="true"
+            >
               {seedSnapshot.incomingEmotion} {seedSnapshot.incomingSeed}
             </span>
           )}
@@ -339,12 +350,11 @@ export default function Home() {
 
       {error && <p className="nagi-error" role="alert">{error}</p>}
 
-      <div className="nagi-controls" aria-hidden={!controlsVisible}>
+      <div className="nagi-controls" role="group" aria-label="Playback controls">
         <button
           type="button"
           onClick={togglePlaying}
           aria-label={playing ? 'Pause sound' : 'Resume sound'}
-          tabIndex={controlsVisible ? 0 : -1}
         >
           {playing ? 'pause' : 'listen'}
         </button>
@@ -353,7 +363,6 @@ export default function Home() {
           type="button"
           onClick={toggleMuted}
           aria-label={muted ? 'Unmute sound' : 'Mute sound'}
-          tabIndex={controlsVisible ? 0 : -1}
         >
           {muted ? 'unmute' : 'quiet'}
         </button>
@@ -362,7 +371,6 @@ export default function Home() {
           type="button"
           onClick={randomize}
           aria-label="Randomize the musical and visual seed"
-          tabIndex={controlsVisible ? 0 : -1}
         >
           random
         </button>
@@ -374,7 +382,6 @@ export default function Home() {
             max={MAX_VOLUME}
             step="0.01"
             value={volume}
-            tabIndex={controlsVisible ? 0 : -1}
             onPointerDown={(event) => {
               event.currentTarget.setPointerCapture(event.pointerId);
               applyVolumeFromPointer(event);

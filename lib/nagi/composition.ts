@@ -39,6 +39,12 @@ const wrap = (value: number, length: number) =>
 
 const clonePattern = (pattern: readonly number[]) => [...pattern];
 
+const rotatePattern = <T>(pattern: readonly T[], amount: number) => {
+  if (pattern.length === 0) return [];
+  const offset = wrap(amount, pattern.length);
+  return [...pattern.slice(offset), ...pattern.slice(0, offset)];
+};
+
 export const createMotif = (
   random: SeededRandom,
   arousal: number,
@@ -71,24 +77,42 @@ export const createMotif = (
   }
 
   const mode = valence >= 0.48 ? 'major' : 'minor';
-  const useFamiliarTheme = random.next() < 0.68;
+  // Familiar material is a structural prior, not a quotation engine. Most
+  // motifs come from the corpus model; archetypes are rotated, transposed in
+  // scale space and often inverted before they enter the live composition.
+  const useFamiliarTheme = random.next() < 0.34;
   const familiarTheme = useFamiliarTheme
     ? chooseFamiliarClassicalTheme(random, mode)
     : null;
   const motifLength = 5 + Math.floor(random.next() * 4);
-  let contour = familiarTheme
-    ? clonePattern(familiarTheme.contour)
+  const themeRotation = familiarTheme
+    ? Math.floor(random.next() * familiarTheme.contour.length)
+    : 0;
+  const rotatedTheme = familiarTheme
+    ? rotatePattern(familiarTheme.contour, themeRotation)
+    : null;
+  const themeOrigin = rotatedTheme?.[0] ?? 0;
+  let contour = rotatedTheme
+    ? rotatedTheme
+        .slice(0, motifLength)
+        .map((degree) => clamp(degree - themeOrigin, -5, 5))
     : sampleClassicalContour(random, motifLength, mode);
-  if (familiarTheme && random.next() < 0.18) {
+  if (familiarTheme && random.next() < 0.48) {
     contour = contour.map((degree) => -degree);
   }
-  if (familiarTheme && random.next() < 0.12) {
+  if (familiarTheme && random.next() < 0.3) {
     contour = [0, ...contour.slice(1).reverse()];
   }
   const rhythm = familiarTheme
-    ? familiarTheme.rhythmBeats.map((beat) =>
-        clamp(beat * (1.16 - arousal * 0.22), 0.5, 2.5),
-      )
+    ? rotatePattern(familiarTheme.rhythmBeats, themeRotation)
+        .slice(0, contour.length)
+        .map((beat) =>
+          clamp(
+            beat * (1.16 - arousal * 0.22) * random.between(0.9, 1.12),
+            0.5,
+            2.5,
+          ),
+        )
     : sampleClassicalRhythm(random, contour.length, mode, arousal);
   return {
     anchorDegree: random.pick([0, 0, 2, 4, 5] as const),
@@ -115,17 +139,17 @@ const quantizeDuration = (beats: number, subdivisionsPerBeat: number) => {
 const evolveMotif = (motif: MotifDNA, random: SeededRandom) => {
   motif.cycle += 1;
   motif.sequenceDegree = [0, 1, 0, -1][motif.cycle % 4];
-  if (motif.cycle % 16 !== 0 || motif.contour.length < 4) return;
+  if (motif.cycle % 12 !== 0 || motif.contour.length < 4) return;
   const index = 1 + Math.floor(random.next() * (motif.contour.length - 1));
   motif.contour[index] = clamp(
     motif.contour[index] + random.pick([-1, 1] as const),
     -4,
     4,
   );
-  if (motif.cycle % 64 === 0) {
+  if (motif.cycle % 36 === 0) {
     const rhythmIndex = Math.floor(random.next() * motif.rhythmBeats.length);
     motif.rhythmBeats[rhythmIndex] = clamp(
-      motif.rhythmBeats[rhythmIndex] + random.pick([-0.25, 0.25] as const),
+      motif.rhythmBeats[rhythmIndex] * random.pick([0.8, 1.25] as const),
       0.5,
       2.25,
     );

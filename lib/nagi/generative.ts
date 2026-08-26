@@ -261,11 +261,49 @@ export const smoothstep = (value: number) => {
   return x * x * (3 - 2 * x);
 };
 
+// C2-continuous easing avoids the acceleration kink that is still present in
+// cubic smoothstep. It is used for long weather and seed transitions where a
+// second-derivative discontinuity can be heard or seen as a change of gear.
+export const smootherstep = (value: number) => {
+  const x = clamp(value);
+  return x * x * x * (x * (x * 6 - 15) + 10);
+};
+
 export const normalizeSeed = (value: number) =>
   (value >>> 0).toString(16).toUpperCase().padStart(8, '0');
 
 export const seedToNumber = (seed: string) =>
   Number.parseInt(seed.replace(/[^0-9a-f]/gi, '').slice(0, 8), 16) >>> 0;
+
+export const mixUint32 = (input: number) => {
+  let value = input >>> 0;
+  value = Math.imul(value ^ (value >>> 16), 0x7feb352d);
+  value = Math.imul(value ^ (value >>> 15), 0x846ca68b);
+  return (value ^ (value >>> 16)) >>> 0;
+};
+
+const hashDomain = (domain: string | number) => {
+  if (typeof domain === 'number') return mixUint32(domain);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < domain.length; index += 1) {
+    hash ^= domain.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return mixUint32(hash);
+};
+
+export const deriveSeedNumber = (
+  seed: string | number,
+  domain: string | number,
+) => mixUint32(
+  (typeof seed === 'number' ? seed : seedToNumber(seed)) ^ hashDomain(domain),
+);
+
+export const seedUnit = (seed: string | number, domain: string | number) =>
+  deriveSeedNumber(seed, domain) / 4294967296;
+
+export const visualVariantFromSeed = (seed: string, variants = 3) =>
+  deriveSeedNumber(seed, 'visual-style') % Math.max(1, Math.floor(variants));
 
 export const randomSeed = () => {
   const values = new Uint32Array(1);
@@ -274,19 +312,18 @@ export const randomSeed = () => {
 };
 
 export const nextSeed = (seed: string) => {
-  let value = (seedToNumber(seed) ^ 0x9e3779b9) >>> 0;
-  value ^= value << 13;
-  value ^= value >>> 17;
-  value ^= value << 5;
+  const value = deriveSeedNumber(seed, 0x9e3779b9);
   return normalizeSeed(value || 0xa341316c);
 };
 
 export class SeededRandom {
+  private readonly origin: number;
   private state: number;
 
   constructor(seed: number | string) {
-    this.state =
+    this.origin =
       (typeof seed === 'number' ? seed : seedToNumber(seed)) || 0x6d2b79f5;
+    this.state = this.origin;
   }
 
   next() {
@@ -302,6 +339,10 @@ export class SeededRandom {
 
   pick<T>(values: readonly T[]) {
     return values[Math.min(values.length - 1, Math.floor(this.next() * values.length))];
+  }
+
+  fork(domain: string | number) {
+    return new SeededRandom(deriveSeedNumber(this.origin, domain));
   }
 }
 
@@ -322,19 +363,25 @@ const wrapDegree = (degree: number, length = 7) =>
 const pitchClass = (midi: number) => ((midi % 12) + 12) % 12;
 
 export const profileFromSeed = (seed: string): WeatherProfile => {
-  const random = new SeededRandom(seed);
+  const random = new SeededRandom(deriveSeedNumber(seed, 'weather'));
+  const light = random.next();
+  const intimacy = random.next();
+  const activity = random.next();
+  const fluidity = random.next();
+  const shimmer = clamp(light * 0.58 + activity * 0.24 + random.next() * 0.18);
+  const openness = clamp((1 - intimacy) * 0.72 + fluidity * 0.18 + random.next() * 0.1);
   return {
-    brightness: random.between(0.24, 0.66),
-    density: random.between(0.3, 0.68),
-    depth: random.between(0.34, 0.9),
-    flow: random.between(0.18, 0.86),
+    brightness: clamp(0.24 + light * 0.42 + random.between(-0.025, 0.025), 0.22, 0.7),
+    density: clamp(0.28 + activity * 0.34 + intimacy * 0.08, 0.28, 0.7),
+    depth: clamp(0.4 + openness * 0.48 + random.between(-0.035, 0.035), 0.34, 0.92),
+    flow: clamp(0.18 + fluidity * 0.65 + activity * 0.08, 0.18, 0.9),
     harmonicHue: random.between(0.16, 0.86),
-    motion: random.between(0.22, 0.72),
+    motion: clamp(0.2 + activity * 0.42 + fluidity * 0.16, 0.2, 0.76),
     shape: random.between(0.08, 0.94),
-    space: random.between(0.38, 0.76),
-    sparkle: random.between(0.1, 0.62),
-    spread: random.between(0.48, 0.92),
-    warmth: random.between(0.3, 0.78),
+    space: clamp(0.36 + openness * 0.46, 0.36, 0.82),
+    sparkle: clamp(0.08 + shimmer * 0.56, 0.08, 0.66),
+    spread: clamp(0.48 + openness * 0.4, 0.48, 0.92),
+    warmth: clamp(0.28 + (light * 0.58 + intimacy * 0.42) * 0.5, 0.28, 0.8),
   };
 };
 
@@ -383,7 +430,7 @@ export const interpolateProfile = (
   to: WeatherProfile,
   amount: number,
 ): WeatherProfile => {
-  const mix = smoothstep(amount);
+  const mix = smootherstep(amount);
   const lerp = (a: number, b: number) => a + (b - a) * mix;
   return {
     brightness: lerp(from.brightness, to.brightness),
@@ -643,10 +690,14 @@ export const chordPitchClasses = (
   const mode = MODES[scene.modeIndex].intervals;
   const harmonicFunction = harmonicFunctionForDegree(scene, degree);
   let offsets: readonly number[] = [0, 2, 4];
-  if (color > 0.76 && harmonicFunction === 'tonic') {
+  // Extensions are intentionally sparse: they colour structurally stable
+  // chords, but do not turn every sustained bed into a dense seventh chord.
+  if (color > 0.64 && harmonicFunction === 'tonic') {
     offsets = [0, 2, 4, 5];
-  } else if (color > 0.86 && harmonicFunction === 'dominant') {
+  } else if (color > 0.69 && harmonicFunction === 'dominant') {
     offsets = [0, 2, 4, 6];
+  } else if (color > 0.73 && harmonicFunction === 'predominant') {
+    offsets = [0, 1, 2, 4];
   }
   const classes = offsets.map((offset) => {
     const scaleIndex = degree + offset;
@@ -859,6 +910,19 @@ export const initialEmotionFromSeed = (seed: string) => {
 const scenePitchClasses = (scene: HarmonicScene) =>
   new Set(MODES[scene.modeIndex].intervals.map((interval) => pitchClass(scene.tonic + interval)));
 
+export const sceneScaleCommonTones = (
+  from: HarmonicScene,
+  to: HarmonicScene,
+) => {
+  const source = scenePitchClasses(from);
+  return [...scenePitchClasses(to)].filter((note) => source.has(note)).length;
+};
+
+const circularPitchDistance = (from: number, to: number) => {
+  const distance = Math.abs(pitchClass(to) - pitchClass(from));
+  return Math.min(distance, 12 - distance);
+};
+
 export const chooseNeighborScene = (
   scene: HarmonicScene,
   random: SeededRandom,
@@ -870,27 +934,40 @@ export const chooseNeighborScene = (
     0.32,
     0.97,
   );
-  const keyMoves = [0, 0, 0, 7, 5, 2, 10, 9, 3] as const;
+  const keyMoves = [0, 7, 5, 2, 10, 9, 3] as const;
   const candidates: Array<{ modeIndex: number; score: number; tonic: number }> = [];
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const modeIndex = random.next() < 0.5
-      ? scene.modeIndex
-      : chooseModeForValence(valence, random);
-    const tonic = pitchClass(scene.tonic + random.pick(keyMoves));
-    const target = new Set(
-      MODES[modeIndex].intervals.map((interval) => pitchClass(tonic + interval)),
-    );
-    const shared = [...target].filter((note) => source.has(note)).length;
-    const moodFit = 1 - Math.abs(MODES[modeIndex].valence - valence);
-    const score =
-      shared +
-      moodFit * 0.7 +
-      (modeIndex === scene.modeIndex ? 0.38 : 0) +
-      (tonic === scene.tonic ? 0.26 : 0);
-    candidates.push({ modeIndex, score, tonic });
+  for (const move of keyMoves) {
+    const tonic = pitchClass(scene.tonic + move);
+    for (let modeIndex = 0; modeIndex < MODES.length; modeIndex += 1) {
+      const target = new Set(
+        MODES[modeIndex].intervals.map((interval) => pitchClass(tonic + interval)),
+      );
+      const shared = [...target].filter((note) => source.has(note)).length;
+      if (shared < 4) continue;
+      const moodFit = 1 - Math.abs(MODES[modeIndex].valence - valence);
+      const comfort = MODE_COMFORT_WEIGHT[modeIndex];
+      const tonicDistance = circularPitchDistance(scene.tonic, tonic);
+      const unchanged = modeIndex === scene.modeIndex && tonic === scene.tonic;
+      const score =
+        shared * 1.15 +
+        moodFit * 1.4 +
+        comfort * 0.7 +
+        (modeIndex === scene.modeIndex ? 0.34 : 0) +
+        (tonic === scene.tonic ? 0.2 : 0) -
+        tonicDistance * 0.08 -
+        (unchanged ? 0.62 : 0);
+      candidates.push({ modeIndex, score, tonic });
+    }
   }
   candidates.sort((a, b) => b.score - a.score);
-  const neighbor = candidates[Math.floor(random.next() ** 2 * Math.min(9, candidates.length))];
+  const neighborhood = candidates.slice(0, Math.min(12, candidates.length));
+  const floor = neighborhood.at(-1)?.score ?? 0;
+  const neighbor = neighborhood[
+    weightedIndex(
+      neighborhood.map((candidate) => Math.exp((candidate.score - floor) * 1.35)),
+      random,
+    )
+  ] ?? { modeIndex: scene.modeIndex, tonic: scene.tonic };
   const meterIndex = random.next() < 0.84
     ? scene.meterIndex
     : weightedIndex([0.46, 0.16, 0.3, 0.08], random);
@@ -1008,13 +1085,22 @@ export const planRhythm = (
   });
 };
 
-export const chooseChordSpanBars = (scene: HarmonicScene, random: SeededRandom) => {
+export const chooseChordSpanBars = (
+  scene: HarmonicScene,
+  random: SeededRandom,
+  remainingPhraseBars = Infinity,
+) => {
   const meter = METERS[scene.meterIndex];
-  if (meter.beatsPerBar <= 2) return random.pick([3, 4, 4, 5] as const);
-  if (meter.beatsPerBar >= 5) return random.pick([1, 1, 2, 2] as const);
-  if (scene.arousal > 0.72) return random.pick([1, 1, 1, 2] as const);
-  if (scene.arousal > 0.5) return random.pick([1, 1, 2, 2] as const);
-  return random.pick([1, 2, 2, 2, 3] as const);
+  const chosen = meter.beatsPerBar <= 2
+    ? random.pick([3, 4, 4, 5] as const)
+    : meter.beatsPerBar >= 5
+      ? random.pick([1, 1, 2, 2] as const)
+      : scene.arousal > 0.72
+        ? random.pick([1, 1, 1, 2] as const)
+        : scene.arousal > 0.5
+          ? random.pick([1, 1, 2, 2] as const)
+          : random.pick([1, 2, 2, 2, 3] as const);
+  return Math.max(1, Math.min(chosen, Math.max(1, Math.floor(remainingPhraseBars))));
 };
 
 export const isChordTone = (scene: HarmonicScene, degree: number, midi: number) =>
@@ -1087,7 +1173,9 @@ export const pickMelodyMidi = (
       const scaleDegree = mode.indexOf(pitchClass(midi - scene.tonic));
       const tonalStability = [1, 0.44, 0.7, 0.58, 0.9, 0.64, 0.36][scaleDegree] ?? 0.45;
       score -= tonalStability * (0.18 + metricStrength * 0.52);
-      score += random.between(0, 1.42);
+      // Randomness breaks ties; it must not outweigh contour, harmonic
+      // resolution, or register. This keeps the motif audible as an identity.
+      score += random.between(0, 0.62);
       return { midi, score };
     })
     .sort((a, b) => a.score - b.score);
