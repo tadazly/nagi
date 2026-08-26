@@ -59,7 +59,7 @@ button {
     linear-gradient(145deg, #111726, #050711 72%);
 }
 
-.nagi-canvas,
+.nagi-scene,
 .nagi-haze,
 .nagi-grain {
   position: absolute;
@@ -68,14 +68,20 @@ button {
   height: 100%;
 }
 
-.nagi-canvas {
-  display: block;
+.nagi-scene {
   opacity: 0;
   transform: scale(1.015);
   transition: opacity 2.4s ease;
 }
 
-.nagi-shell[data-ready='true'] .nagi-canvas {
+.nagi-scene canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  outline: none;
+}
+
+.nagi-shell[data-ready='true'] .nagi-scene {
   opacity: 1;
 }
 
@@ -329,7 +335,7 @@ button {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .nagi-canvas,
+  .nagi-scene,
   .nagi-center,
   .nagi-enter,
   .nagi-controls,

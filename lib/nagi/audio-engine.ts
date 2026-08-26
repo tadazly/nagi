@@ -43,6 +43,8 @@ export type NagiDiagnostics = {
   interaction: number;
   maxSchedulerJitterMs: number;
   mid: number;
+  outputPeak: number;
+  outputRms: number;
   scheduledEvents: number;
   transition: number;
   treble: number;
@@ -58,6 +60,7 @@ export class NagiAudioEngine {
   private airWave?: PeriodicWave;
   private analyser?: AnalyserNode;
   private analyserData?: Uint8Array<ArrayBuffer>;
+  private analyserTimeData?: Float32Array<ArrayBuffer>;
   private bands: AudioBands = { bass: 0, mid: 0, treble: 0, interaction: 0 };
   private bellWave?: PeriodicWave;
   private chordDegree = 0;
@@ -92,11 +95,13 @@ export class NagiAudioEngine {
   private playing = false;
   private random: SeededRandom;
   private scheduledEvents = 0;
+  private outputPeak = 0;
+  private outputRms = 0;
   private sourceBus?: GainNode;
   private timer?: ReturnType<typeof setInterval>;
   private transitionDuration = 0;
   private transitionStartedAt = 0;
-  private volume = 0.62;
+  private volume = 0.72;
   private wet?: GainNode;
 
   constructor(seed: string, options: EngineOptions = {}) {
@@ -114,7 +119,12 @@ export class NagiAudioEngine {
       return;
     }
 
-    const context = new AudioContext({ latencyHint: 'interactive' });
+    const AudioContextClass =
+      window.AudioContext ??
+      (window as typeof window & { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AudioContextClass) throw new Error('Web Audio is not supported');
+    const context = new AudioContextClass({ latencyHint: 'interactive' });
     this.context = context;
     this.sourceBus = context.createGain();
     this.effectsBus = context.createGain();
@@ -144,19 +154,22 @@ export class NagiAudioEngine {
     delayPanB.pan.value = 0.66;
 
     this.compressor = context.createDynamicsCompressor();
-    this.compressor.threshold.value = -20;
+    this.compressor.threshold.value = -24;
     this.compressor.knee.value = 20;
-    this.compressor.ratio.value = 2.4;
+    this.compressor.ratio.value = 3;
     this.compressor.attack.value = 0.11;
     this.compressor.release.value = 1.15;
     this.globalPanner = context.createStereoPanner();
+    const makeup = context.createGain();
+    makeup.gain.value = 2.8;
 
     this.master = context.createGain();
     this.master.gain.value = 0;
     this.analyser = context.createAnalyser();
-    this.analyser.fftSize = 1024;
+    this.analyser.fftSize = 2048;
     this.analyser.smoothingTimeConstant = 0.82;
     this.analyserData = new Uint8Array(this.analyser.frequencyBinCount);
+    this.analyserTimeData = new Float32Array(this.analyser.fftSize);
 
     this.effectsBus.connect(this.sourceBus);
     this.effectsBus.connect(delayA);
@@ -173,7 +186,8 @@ export class NagiAudioEngine {
     this.filter.connect(convolver);
     convolver.connect(this.wet);
     this.wet.connect(this.compressor);
-    this.compressor.connect(this.globalPanner);
+    this.compressor.connect(makeup);
+    makeup.connect(this.globalPanner);
     this.globalPanner.connect(this.master);
     this.master.connect(this.analyser);
     this.analyser.connect(context.destination);
@@ -288,6 +302,19 @@ export class NagiAudioEngine {
   readAudioBands(): AudioBands {
     if (!this.analyser || !this.analyserData || !this.context) return this.bands;
     this.analyser.getByteFrequencyData(this.analyserData);
+    if (this.analyserTimeData) {
+      this.analyser.getFloatTimeDomainData(this.analyserTimeData);
+      let sumSquares = 0;
+      let peak = 0;
+      for (let index = 0; index < this.analyserTimeData.length; index += 1) {
+        const sample = this.analyserTimeData[index];
+        sumSquares += sample * sample;
+        peak = Math.max(peak, Math.abs(sample));
+      }
+      const rms = Math.sqrt(sumSquares / this.analyserTimeData.length);
+      this.outputRms += (rms - this.outputRms) * 0.12;
+      this.outputPeak = Math.max(peak, this.outputPeak * 0.94);
+    }
     const hzPerBin = this.context.sampleRate / this.analyser.fftSize;
     const bandEnergy = (fromHz: number, toHz: number) => {
       const from = Math.max(1, Math.floor(fromHz / hzPerBin));
@@ -331,6 +358,8 @@ export class NagiAudioEngine {
       interaction: this.bands.interaction,
       maxSchedulerJitterMs: Math.round(this.maxSchedulerJitterMs),
       mid: this.bands.mid,
+      outputPeak: this.outputPeak,
+      outputRms: this.outputRms,
       scheduledEvents: this.scheduledEvents,
       transition: snapshot.transition,
       treble: this.bands.treble,
