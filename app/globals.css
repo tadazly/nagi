@@ -1,6 +1,8 @@
 @import 'tailwindcss';
 
 :root {
+  --font-nagi-sans: "Avenir Next", Avenir, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-nagi-mono: "SFMono-Regular", "SF Mono", Menlo, Monaco, Consolas, monospace;
   color-scheme: dark;
   --ink: rgba(247, 246, 242, 0.91);
   --muted: rgba(236, 236, 232, 0.43);
@@ -22,7 +24,7 @@ body {
 
 body {
   color: var(--ink);
-  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  font-family: var(--font-nagi-sans);
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
 }
@@ -148,7 +150,7 @@ button {
   height: 0.8rem;
   margin: 1.5rem 0 0;
   color: var(--muted);
-  font-family: var(--font-geist-mono), monospace;
+  font-family: var(--font-nagi-mono);
   font-size: 0.6rem;
   font-weight: 400;
   letter-spacing: 0.18em;

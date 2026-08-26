@@ -13,6 +13,7 @@ import {
   findPivotDegree,
   interpolateProfile,
   isChordTone,
+  metricStrengthAt,
   nextSeed,
   pickMelodyMidi,
   profileFromSeed,
@@ -121,6 +122,9 @@ let darkModeChords = 0;
 let highTensionChords = 0;
 let triadChords = 0;
 let unstableTriadChords = 0;
+let brightMoodChords = 0;
+let accompanimentPulseEvents = 0;
+let maxAccompanimentGridError = 0;
 let maxGridUnitError = 0;
 let maxExpressiveOffsetMs = 0;
 let maxTransportDriftMs = 0;
@@ -180,7 +184,7 @@ while (now < END_SECONDS) {
   );
   const targetTempo = tempoFromArousal(currentArousal, currentValence);
   const previousTempo = transportTempo;
-  transportTempo += clamp(targetTempo - transportTempo, -2.6, 2.6);
+  transportTempo += clamp(targetTempo - transportTempo, -3.2, 3.2);
   maxTempoStep = Math.max(maxTempoStep, Math.abs(transportTempo - previousTempo));
   minimumBpm = Math.min(minimumBpm, transportTempo);
   maximumBpm = Math.max(maximumBpm, transportTempo);
@@ -237,6 +241,31 @@ while (now < END_SECONDS) {
   if (degreeTriadComfort(sceneForChord, chordDegree) < 0.5) unstableTriadChords += 1;
   if (darkModes.has(MODES[sceneForChord.modeIndex].id)) darkModeChords += 1;
   if (degreeTension(chordDegree) > 0.6) highTensionChords += 1;
+  if (sceneForChord.valence > 0.7 && sceneForChord.arousal > 0.58) brightMoodChords += 1;
+
+  for (let bar = 0; bar < spanBars; bar += 1) {
+    for (let beat = 0; beat < meter.beatsPerBar; beat += 1) {
+      const strength = metricStrengthAt(meter, beat);
+      if (sceneForChord.arousal < 0.34 && strength < 0.58) continue;
+      const pulseBeat = bar * meter.beatsPerBar + beat;
+      maxAccompanimentGridError = Math.max(
+        maxAccompanimentGridError,
+        Math.abs(pulseBeat * meter.subdivisionsPerBeat - Math.round(pulseBeat * meter.subdivisionsPerBeat)),
+      );
+      const pulseDuration = beatSeconds * (0.42 + (1 - sceneForChord.arousal) * 0.16);
+      intervals.push([now + pulseBeat * beatSeconds, now + pulseBeat * beatSeconds + pulseDuration]);
+      accompanimentPulseEvents += 1;
+      if (sceneForChord.arousal > 0.78 && (beat + bar) % 2 === 0) {
+        const offbeat = pulseBeat + 0.5;
+        maxAccompanimentGridError = Math.max(
+          maxAccompanimentGridError,
+          Math.abs(offbeat * meter.subdivisionsPerBeat * 2 - Math.round(offbeat * meter.subdivisionsPerBeat * 2)),
+        );
+        intervals.push([now + offbeat * beatSeconds, now + (offbeat + 0.28) * beatSeconds]);
+        accompanimentPulseEvents += 1;
+      }
+    }
+  }
 
   const leadEvents = planMotifPhrase(
     sceneForChord,
@@ -383,12 +412,16 @@ const darkModeShare = darkModeChords / Math.max(1, chordCount);
 const highTensionShare = highTensionChords / Math.max(1, chordCount);
 const triadShare = triadChords / Math.max(1, chordCount);
 const unstableTriadShare = unstableTriadChords / Math.max(1, chordCount);
+const brightMoodShare = brightMoodChords / Math.max(1, chordCount);
 
 const assertions = {
   activeSourceCap: maxActiveSources <= 40,
+  accompanimentUsesTransportGrid: maxAccompanimentGridError < 1e-9,
   backgroundRoughnessIsControlled: averageBackgroundRoughness < 0.12,
   backgroundUsesBreathingDynamics: minimumBedBreath < 0.83 && maximumBedBreath > 0.99,
-  bpmRangeIsExpressive: maximumBpm - minimumBpm > 34,
+  bpmRangeIsMusical:
+    minimumBpm >= 58 && maximumBpm > 120 && maximumBpm <= 136.000001,
+  brightMoodsAreRepresented: brightMoodShare > 0.2,
   continuousEmotion: maxEmotionStep < 0.09,
   continuousWeather: maxProfileStep < 0.012,
   corpusPriorLoaded:
@@ -396,7 +429,7 @@ const assertions = {
     CLASSICAL_MODEL_META.melodyNoteCount >= 150000 &&
     CLASSICAL_MODEL_META.accompanimentNoteCount >= 900000,
   counterpointIndependence: counterpointIndependence > 0.72,
-  expressiveTimingIsBounded: maxExpressiveOffsetMs < 150,
+  expressiveTimingIsBounded: maxExpressiveOffsetMs < 38,
   gridIntegrity: maxGridUnitError < 1e-9,
   immediateOpening: 0.025 < 0.1,
   darkModesRemainRareColour: darkModeShare < 0.12,
@@ -416,7 +449,7 @@ const assertions = {
   strongBeatsAreHarmonicallyStable: strongBeatConsonance > 0.78,
   sustainedHarmonyIsMostlyTriadic: triadShare > 0.92,
   unstableTriadsRemainPassingColour: unstableTriadShare < 0.055,
-  tempoTransitionsAreGradual: maxTempoStep <= 2.600001,
+  tempoTransitionsAreGradual: maxTempoStep <= 3.200001,
   tonalCoverage: keys.size >= 10,
   transportHasNoCumulativeDrift: maxTransportDriftMs < 1e-6,
   voiceLeadingIsSmooth: averageVoiceMovement < 7,
@@ -424,6 +457,7 @@ const assertions = {
 
 const report = {
   assertions,
+  accompanimentPulseEvents,
   averageBackgroundRoughness: Number(averageBackgroundRoughness.toFixed(4)),
   averageCounterMovement: Number(averageCounterMovement.toFixed(3)),
   averageLeadMovement: Number(averageLeadMovement.toFixed(3)),
@@ -431,6 +465,7 @@ const report = {
   averagePivotCommonTones: Number(averagePivotCommonTones.toFixed(3)),
   averageVoiceMovement: Number(averageVoiceMovement.toFixed(3)),
   bpmRange: [Number(minimumBpm.toFixed(2)), Number(maximumBpm.toFixed(2))],
+  brightMoodShare: Number(brightMoodShare.toFixed(4)),
   classicalCorpus: CLASSICAL_MODEL_META,
   chordsGenerated: chordCount,
   counterpointIndependence: Number(counterpointIndependence.toFixed(4)),
@@ -440,6 +475,7 @@ const report = {
   leadMotifCycles: leadMotif.cycle,
   leadMotifMutations: leadMotif.mutations,
   maxActiveSources,
+  maxAccompanimentGridError,
   maxEmotionStep: Number(maxEmotionStep.toFixed(5)),
   maxExpressiveOffsetMs: Number(maxExpressiveOffsetMs.toFixed(3)),
   maxGridUnitError,

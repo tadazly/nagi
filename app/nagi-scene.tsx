@@ -32,10 +32,13 @@ export type NagiPointerField = {
 
 export type NagiRendererDiagnostics = {
   antialias: boolean;
+  barPhase: number;
+  beatPhase: number;
   drawCalls: number;
   fps: number;
   frames: number;
   pointerEnergy: number;
+  pulse: number;
   quality: number;
   webgl: boolean;
 };
@@ -66,6 +69,7 @@ uniform float uTime;
 uniform float uSeed;
 uniform vec2 uEmotion;
 uniform vec3 uPointer;
+uniform vec4 uTransport;
 varying vec3 vDirection;
 
 float hash31(vec3 p) {
@@ -132,6 +136,10 @@ void main() {
   vec3 veil = mix(auroraA, auroraB, mist) * (0.28 + aurora * 1.08 + mist * 0.14);
   vec3 facets = crystalColor * (0.1 + crystal * 0.98 + mist * 0.16);
   vec3 color = calm * calmWeight + veil * auroraWeight + facets * crystalWeight;
+  float beatGlow = uTransport.x * mix(0.012, 0.045, arousal);
+  float barWave = 0.5 + 0.5 * cos(uTransport.z * 6.2831853);
+  color += mix(vec3(0.025, 0.07, 0.09), vec3(0.11, 0.075, 0.025), valence)
+    * beatGlow * (0.72 + barWave * 0.28);
   float pointerGlow = pow(max(dot(d, normalize(vec3(uPointer.xy, 0.7))), 0.0), 18.0);
   color += mix(vec3(0.05, 0.12, 0.18), vec3(0.18, 0.12, 0.07), valence)
     * pointerGlow * uPointer.z * 0.34;
@@ -146,7 +154,7 @@ uniform float uSeed;
 uniform float uShape;
 uniform vec4 uAudio;
 uniform vec4 uPointer;
-uniform vec3 uTransport;
+uniform vec4 uTransport;
 uniform vec2 uEmotion;
 varying vec3 vNormalWorld;
 varying vec3 vPosition;
@@ -184,7 +192,8 @@ void main() {
   float cursorFacing = max(dot(normalize(position.xy + vec2(0.0001)), normalize(uPointer.xy + vec2(0.0001))), 0.0);
   float displacement = field * mix(0.1, 0.3, uShape) * mix(0.72, 1.2, arousal)
     + fine * (0.45 + uShape);
-  displacement += uAudio.x * 0.08 + uTransport.x * 0.014 + interaction * cursorFacing * 0.055;
+  displacement += uAudio.x * 0.08 + uTransport.x * mix(0.022, 0.052, arousal)
+    + interaction * cursorFacing * 0.055;
   transformed += vec3(
     sin(position.y * 2.7 + uTime * 0.13),
     sin(position.z * 3.1 - uTime * 0.11),
@@ -208,7 +217,8 @@ uniform float uTime;
 uniform float uSeed;
 uniform float uSparkle;
 uniform vec4 uAudio;
-uniform vec3 uTransport;
+uniform vec4 uTransport;
+uniform float uTension;
 uniform vec2 uEmotion;
 uniform vec3 uColorA;
 uniform vec3 uColorB;
@@ -230,14 +240,20 @@ void main() {
     + uTime * (0.14 + uEmotion.x * 0.12) + uSeed * 23.0
   );
   float caustic = pow(band, 7.0) * (0.08 + uSparkle * 0.24);
-  float phraseWave = sin(uTransport.y * 6.2831853);
-  float interference = 0.5 + 0.5 * sin((vPosition.x - vPosition.z) * 9.0 - uTime * 0.12 + phraseWave * 0.24);
+  float phraseWave = sin(uTransport.w * 6.2831853);
+  float barWave = sin(uTransport.z * 6.2831853);
+  float interference = 0.5 + 0.5 * sin(
+    (vPosition.x - vPosition.z) * 9.0 - uTime * 0.12 + phraseWave * 0.24 + barWave * 0.08
+  );
   vec3 color = mix(uColorA, uColorB, diffuse * 0.64 + opposite * 0.2 + band * 0.15);
   color = mix(color, uColorC, fresnel * (0.58 + uSparkle * 0.25));
   color += uColorC * (caustic + pow(max(diffuse, 0.0), 10.0) * 0.4);
   color += mix(uColorA, uColorC, interference) * vDisplacement * 0.45;
-  color += uColorC * (uAudio.y * 0.11 + uAudio.z * fresnel * 0.22 + uTransport.x * 0.018);
-  color = mix(color, color * vec3(1.04, 0.98, 1.08), uTransport.z * 0.08);
+  color += uColorC * (
+    uAudio.y * 0.11 + uAudio.z * fresnel * 0.22
+    + uTransport.x * mix(0.02, 0.065, uEmotion.x)
+  );
+  color = mix(color, color * vec3(1.04, 0.98, 1.08), uTension * 0.08);
   color = mix(color, color * mix(vec3(0.9, 0.82, 1.18), vec3(1.12, 1.04, 0.82), uEmotion.y), uEmotion.x * 0.16);
   float alpha = 0.9 + fresnel * 0.1;
   gl_FragColor = vec4(max(color, 0.0) * 0.72, alpha);
@@ -290,6 +306,7 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
       uPointer: { value: new THREE.Vector3() },
       uSeed: { value: 0 },
       uTime: { value: 0 },
+      uTransport: { value: new THREE.Vector4() },
     }),
     [],
   );
@@ -325,6 +342,12 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
       pointer.x * 2 - 1,
       1 - pointer.y * 2,
       pointer.targetEnergy,
+    );
+    material.uniforms.uTransport.value.set(
+      audio.pulse,
+      audio.beatPhase,
+      audio.barPhase,
+      audio.phrase,
     );
   });
 
@@ -365,8 +388,9 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
       uSeed: { value: 0 },
       uShape: { value: 0.5 },
       uSparkle: { value: 0.5 },
+      uTension: { value: 0 },
       uTime: { value: 0 },
-      uTransport: { value: new THREE.Vector3() },
+      uTransport: { value: new THREE.Vector4() },
     }),
     [],
   );
@@ -413,7 +437,13 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
     );
     material.uniforms.uAudio.value.set(audio.bass, audio.mid, audio.treble, audio.interaction);
     material.uniforms.uEmotion.value.set(audio.arousal, audio.valence);
-    material.uniforms.uTransport.value.set(audio.pulse, audio.phrase, audio.tension);
+    material.uniforms.uTransport.value.set(
+      audio.pulse,
+      audio.beatPhase,
+      audio.barPhase,
+      audio.phrase,
+    );
+    material.uniforms.uTension.value = audio.tension;
     material.uniforms.uPointer.value.set(
       pointer.x * 2 - 1,
       1 - pointer.y * 2,
@@ -431,14 +461,14 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
 
     const shape = seedSnapshot.profile.shape;
     const targetScale = new THREE.Vector3(
-      0.92 + shape * 0.14 + audio.arousal * 0.13,
-      1.08 - shape * 0.1 - audio.arousal * 0.08,
-      0.9 + seedSnapshot.profile.depth * 0.1 + audio.valence * 0.08,
+      0.92 + shape * 0.14 + audio.arousal * 0.13 + audio.pulse * 0.018,
+      1.08 - shape * 0.1 - audio.arousal * 0.08 + audio.pulse * 0.014,
+      0.9 + seedSnapshot.profile.depth * 0.1 + audio.valence * 0.08 + audio.pulse * 0.02,
     );
     core.scale.lerp(targetScale, 1 - Math.exp(-delta * 0.55));
     shell.scale
       .copy(core.scale)
-      .multiplyScalar(1.035 + audio.bass * 0.035 + audio.pulse * 0.008);
+      .multiplyScalar(1.035 + audio.bass * 0.035 + audio.pulse * 0.018);
     core.rotation.y += delta * (0.035 + seedSnapshot.profile.motion * 0.05);
     core.rotation.x = THREE.MathUtils.lerp(core.rotation.x, (pointer.y - 0.5) * 0.16, 0.025);
     core.rotation.z = THREE.MathUtils.lerp(core.rotation.z, (pointer.x - 0.5) * -0.12, 0.025);
@@ -499,12 +529,13 @@ function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps)
     knotRef.current.rotation.z += delta * 0.026;
     satellitesRef.current.rotation.y += delta * (0.06 + seedSnapshot.profile.motion * 0.09);
     satellitesRef.current.rotation.x = (pointer.y - 0.5) * 0.3;
+    satellitesRef.current.rotation.z = audio.barPhase * Math.PI * 2;
     const moodScale = 0.82 + audio.arousal * 0.42 + audio.valence * 0.08;
     groupRef.current.scale.setScalar(
       THREE.MathUtils.lerp(
         groupRef.current.scale.x,
-        moodScale,
-        1 - Math.exp(-delta * 0.36),
+        moodScale * (1 + audio.pulse * (0.012 + audio.arousal * 0.018)),
+        1 - Math.exp(-delta * 7.5),
       ),
     );
   });
@@ -581,7 +612,9 @@ function SceneController({
     pointer.targetEnergy *= pointer.down > 0 ? 0.965 : 0.9;
     audioRef.current = engineRef.current?.readAudioBands() ?? {
       arousal: 0.16,
+      barPhase: 0,
       bass: 0.025,
+      beatPhase: 0,
       phrase: 0,
       pulse: 0,
       tension: 0,
@@ -590,6 +623,9 @@ function SceneController({
       valence: 0.5,
       interaction: 0,
     };
+    rendererRef.current.barPhase = audioRef.current.barPhase;
+    rendererRef.current.beatPhase = audioRef.current.beatPhase;
+    rendererRef.current.pulse = audioRef.current.pulse;
 
     const mobile = state.size.width < 720;
     pointerTarget.set(
@@ -604,7 +640,9 @@ function SceneController({
       lightRef.current.position.x = -2.2 + (pointer.x - 0.5) * 1.2;
       lightRef.current.position.y = 2.1 + (0.5 - pointer.y) * 0.9;
       lightRef.current.intensity = 3 + audioRef.current.mid * 2.2;
-      secondLightRef.current.intensity = 1.2 + audioRef.current.treble * 3;
+      lightRef.current.intensity += audioRef.current.pulse * 0.28;
+      secondLightRef.current.intensity =
+        1.2 + audioRef.current.treble * 3 + audioRef.current.pulse * 0.16;
     }
 
     const windowState = frameWindow.current;
@@ -697,7 +735,9 @@ function PostEffects({ seedSnapshot }: { seedSnapshot: SeedSnapshot }) {
 export function NagiScene(props: NagiSceneProps) {
   const audioRef = useRef<AudioBands>({
     arousal: 0.16,
+    barPhase: 0,
     bass: 0,
+    beatPhase: 0,
     mid: 0,
     treble: 0,
     interaction: 0,

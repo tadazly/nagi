@@ -56,10 +56,13 @@ export default function Home() {
   const startingRef = useRef(false);
   const rendererRef = useRef<NagiRendererDiagnostics>({
     antialias: false,
+    barPhase: 0,
+    beatPhase: 0,
     drawCalls: 0,
     fps: 0,
     frames: 0,
     pointerEnergy: 0,
+    pulse: 0,
     quality: 1,
     webgl: false,
   });
@@ -80,7 +83,10 @@ export default function Home() {
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
-      const seed = randomSeed();
+      const requestedSeed = new URLSearchParams(window.location.search).get('seed');
+      const seed = requestedSeed && /^[0-9a-f]{8}$/i.test(requestedSeed)
+        ? requestedSeed.toUpperCase()
+        : randomSeed();
       seedRef.current = seed;
       setSeedSnapshot({
         currentSeed: seed,

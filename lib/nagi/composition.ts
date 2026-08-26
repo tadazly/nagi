@@ -133,11 +133,14 @@ export const planMotifPhrase = (
     const phrasePosition =
       ((phraseBar + beat / meter.beatsPerBar) % scene.phraseBars) /
       scene.phraseBars;
+    // Keep expressive timing inside the shared transport grid. Strong beats
+    // remain virtually exact; weaker notes may breathe by only a few ms.
     const rubatoDepth =
-      (0.018 + (1 - scene.arousal) * 0.046) * (1 - metricStrength * 0.72);
+      (0.006 + (1 - scene.arousal) * 0.014) * (1 - metricStrength);
     const correlatedRubato =
       Math.sin((phrasePosition * 2 + motif.cycle * 0.17) * Math.PI) * rubatoDepth;
-    const humanizeBeats = correlatedRubato + random.between(-0.008, 0.008);
+    const humanizeBeats =
+      correlatedRubato + random.between(-0.0035, 0.0035) * (1 - metricStrength);
     const rawIoi = motif.rhythmBeats[motifIndex % motif.rhythmBeats.length];
     const ioi = quantizeDuration(rawIoi, meter.subdivisionsPerBeat);
     const articulation = clamp(

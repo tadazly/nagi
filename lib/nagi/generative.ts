@@ -266,7 +266,11 @@ export const profileFromSeed = (seed: string): WeatherProfile => {
 };
 
 export const tempoFromArousal = (arousal: number, valence = 0.5) =>
-  clamp(36 + clamp(arousal) ** 1.12 * 57 + (clamp(valence) - 0.5) * 4, 34, 96);
+  clamp(
+    58 + clamp(arousal) ** 1.05 * 70 + (clamp(valence) - 0.5) * 8,
+    56,
+    136,
+  );
 
 const chooseModeForValence = (valence: number, random: SeededRandom) =>
   weightedIndex(
@@ -280,8 +284,9 @@ const chooseModeForValence = (valence: number, random: SeededRandom) =>
 
 export const sceneFromSeed = (seed: string): HarmonicScene => {
   const random = new SeededRandom(seedToNumber(seed) ^ 0xb5297a4d);
-  const arousal = random.between(0.06, 0.8);
-  const valence = random.between(0.32, 0.88);
+  const arousal = 0.12 + random.next() ** 0.9 * 0.84;
+  const baseValence = 0.34 + random.next() ** 0.78 * 0.62;
+  const valence = clamp(baseValence + Math.max(0, arousal - 0.68) * 0.16, 0.34, 0.96);
   return {
     arousal,
     cadenceBias: random.between(0.3, 0.72),
@@ -492,8 +497,12 @@ export const chooseNeighborScene = (
   random: SeededRandom,
 ): HarmonicScene => {
   const source = scenePitchClasses(scene);
-  const arousal = clamp(scene.arousal + random.between(-0.16, 0.16), 0.06, 0.82);
-  const valence = clamp(scene.valence + random.between(-0.13, 0.13), 0.3, 0.9);
+  const arousal = clamp(scene.arousal + random.between(-0.19, 0.19), 0.1, 0.98);
+  const valence = clamp(
+    scene.valence + random.between(-0.14, 0.14) + Math.max(0, arousal - 0.72) * 0.05,
+    0.32,
+    0.97,
+  );
   const keyMoves = [0, 0, 0, 7, 5, 2, 10, 9, 3] as const;
   const candidates: Array<{ modeIndex: number; score: number; tonic: number }> = [];
   for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -636,6 +645,8 @@ export const chooseChordSpanBars = (scene: HarmonicScene, random: SeededRandom) 
   const meter = METERS[scene.meterIndex];
   if (meter.beatsPerBar <= 2) return random.pick([3, 4, 4, 5] as const);
   if (meter.beatsPerBar >= 5) return random.pick([1, 1, 2, 2] as const);
+  if (scene.arousal > 0.72) return random.pick([1, 1, 1, 2] as const);
+  if (scene.arousal > 0.5) return random.pick([1, 1, 2, 2] as const);
   return random.pick([1, 2, 2, 2, 3] as const);
 };
 

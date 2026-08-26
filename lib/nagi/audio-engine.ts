@@ -10,6 +10,7 @@ import {
   findPivotDegree,
   interpolateProfile,
   isChordTone,
+  metricStrengthAt,
   midiToFrequency,
   nextSeed,
   pickMelodyMidi,
@@ -38,7 +39,9 @@ type EngineOptions = {
 
 export type AudioBands = {
   arousal: number;
+  barPhase: number;
   bass: number;
+  beatPhase: number;
   interaction: number;
   mid: number;
   phrase: number;
@@ -49,11 +52,14 @@ export type AudioBands = {
 };
 
 export type NagiDiagnostics = {
+  accompanimentPulseEvents: number;
   activeSources: number;
   arousal: number;
   bar: number;
+  barPhase: number;
   bass: number;
   beat: number;
+  beatPhase: number;
   bpm: number;
   chordDegree: number;
   contextState: AudioContextState | 'uninitialized';
@@ -71,6 +77,7 @@ export type NagiDiagnostics = {
   mid: number;
   outputPeak: number;
   outputRms: number;
+  pulse: number;
   scheduledEvents: number;
   schedulerRecoveries: number;
   transition: number;
@@ -92,7 +99,9 @@ type TransportSegment = {
 };
 
 type TransportState = {
+  accent: number;
   bar: number;
+  barPhase: number;
   beat: number;
   beatPhase: number;
   bpm: number;
@@ -119,7 +128,9 @@ export class NagiAudioEngine {
   private analyserTimeData?: Float32Array<ArrayBuffer>;
   private bands: AudioBands = {
     arousal: 0,
+    barPhase: 0,
     bass: 0,
+    beatPhase: 0,
     mid: 0,
     treble: 0,
     interaction: 0,
@@ -129,6 +140,7 @@ export class NagiAudioEngine {
     valence: 0,
   };
   private bellWave?: PeriodicWave;
+  private accompanimentPulseEvents = 0;
   private chordDegree = 0;
   private chordsUntilSceneChange = 0;
   private compressor?: DynamicsCompressorNode;
@@ -466,7 +478,9 @@ export class NagiAudioEngine {
     this.bands.interaction +=
       (this.interactionEnergy - this.bands.interaction) * 0.12;
     const transport = this.getTransportState(this.context.currentTime);
-    this.bands.pulse += (transport.pulse - this.bands.pulse) * 0.28;
+    this.bands.pulse = transport.pulse;
+    this.bands.beatPhase = transport.beatPhase;
+    this.bands.barPhase = transport.barPhase;
     this.bands.phrase += (transport.phrase - this.bands.phrase) * 0.045;
     this.bands.tension += (transport.tension - this.bands.tension) * 0.035;
     this.bands.arousal += (this.currentArousal - this.bands.arousal) * 0.08;
@@ -478,11 +492,14 @@ export class NagiAudioEngine {
     const snapshot = this.getSnapshot();
     const transport = this.getTransportState(this.context?.currentTime ?? 0);
     return {
+      accompanimentPulseEvents: this.accompanimentPulseEvents,
       activeSources: this.trackedSources.size,
       arousal: this.currentArousal,
       bar: transport.bar,
+      barPhase: transport.barPhase,
       bass: this.bands.bass,
       beat: transport.beat + transport.beatPhase,
+      beatPhase: transport.beatPhase,
       bpm: transport.bpm,
       chordDegree: transport.chordDegree,
       contextState: this.context?.state ?? 'uninitialized',
@@ -500,6 +517,7 @@ export class NagiAudioEngine {
       mid: this.bands.mid,
       outputPeak: this.outputPeak,
       outputRms: this.outputRms,
+      pulse: transport.pulse,
       scheduledEvents: this.scheduledEvents,
       schedulerRecoveries: this.schedulerRecoveries,
       transition: snapshot.transition,
@@ -598,7 +616,9 @@ export class NagiAudioEngine {
     if (!segment) {
       const meter = METERS[this.harmonicScene.meterIndex];
       return {
+        accent: meter.accents[0] ?? 1,
         bar: 0,
+        barPhase: 0,
         beat: 0,
         beatPhase: 0,
         bpm: this.transportTempo,
@@ -619,12 +639,15 @@ export class NagiAudioEngine {
     const beatPhase = beatInBar - beat;
     const accent = meter.accents[beat] ?? 0.4;
     const pulse = Math.exp(-beatPhase * 5.4) * (0.26 + accent * 0.74);
+    const barPhase = (beatInBar % meter.beatsPerBar) / meter.beatsPerBar;
     const phraseBars = Math.max(1, segment.phraseBars);
     const phrase =
       ((segment.phraseBar + elapsedBeats / meter.beatsPerBar) % phraseBars) /
       phraseBars;
     return {
+      accent,
       bar: segment.startBar + elapsedBars,
+      barPhase,
       beat,
       beatPhase,
       bpm: segment.tempo,
@@ -734,7 +757,7 @@ export class NagiAudioEngine {
     const targetTempo = tempoFromArousal(this.currentArousal, this.currentValence);
     this.transportTempo = opening
       ? targetTempo
-      : this.transportTempo + clamp(targetTempo - this.transportTempo, -2.6, 2.6);
+      : this.transportTempo + clamp(targetTempo - this.transportTempo, -3.2, 3.2);
     const color = clamp(
       this.harmonicScene.chordColor * 0.55 +
         profile.harmonicHue * 0.2 +
@@ -805,6 +828,13 @@ export class NagiAudioEngine {
       sceneForChord,
       profile,
       opening,
+    );
+    this.scheduleAccompaniment(
+      start,
+      beatSeconds,
+      spanBars,
+      sceneForChord,
+      profile,
     );
     this.nextHarmonyAt = start + duration;
     this.scheduledBars += spanBars;
@@ -1018,6 +1048,87 @@ export class NagiAudioEngine {
 
     scheduleVoice('lead');
     scheduleVoice('counter');
+  }
+
+  private scheduleAccompaniment(
+    start: number,
+    beatSeconds: number,
+    spanBars: number,
+    scene: HarmonicScene,
+    profile: WeatherProfile,
+  ) {
+    if (!this.context || !this.sourceBus || this.currentVoicing.length === 0) return;
+    const meter = METERS[scene.meterIndex];
+    for (let bar = 0; bar < spanBars; bar += 1) {
+      for (let beat = 0; beat < meter.beatsPerBar; beat += 1) {
+        const strength = metricStrengthAt(meter, beat);
+        if (scene.arousal < 0.34 && strength < 0.58) continue;
+        const noteIndex =
+          (bar * meter.beatsPerBar + beat + this.chordDegree) %
+          this.currentVoicing.length;
+        let midi = this.currentVoicing[noteIndex];
+        if (midi > 74) midi -= 12;
+        this.scheduleHarmonicPulse(
+          start + (bar * meter.beatsPerBar + beat) * beatSeconds,
+          beatSeconds * (0.42 + (1 - scene.arousal) * 0.16),
+          midi,
+          0.52 + strength * 0.48,
+          profile,
+          beat % 2 === 0 ? -0.16 : 0.16,
+        );
+        if (
+          scene.arousal > 0.78 &&
+          (beat + bar) % 2 === 0 &&
+          this.trackedSources.size < 38
+        ) {
+          const upper = this.currentVoicing[(noteIndex + 1) % this.currentVoicing.length];
+          this.scheduleHarmonicPulse(
+            start + (bar * meter.beatsPerBar + beat + 0.5) * beatSeconds,
+            beatSeconds * 0.28,
+            upper,
+            0.34,
+            profile,
+            beat % 2 === 0 ? 0.2 : -0.2,
+          );
+        }
+      }
+    }
+  }
+
+  private scheduleHarmonicPulse(
+    start: number,
+    duration: number,
+    midi: number,
+    accent: number,
+    profile: WeatherProfile,
+    pan: number,
+  ) {
+    if (!this.context || !this.sourceBus || this.trackedSources.size >= 38) return;
+    const context = this.context;
+    const oscillator = context.createOscillator();
+    oscillator.type = 'triangle';
+    oscillator.frequency.setValueAtTime(midiToFrequency(midi), start);
+    const filter = context.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 920 + profile.brightness * 1280;
+    filter.Q.value = 0.22;
+    const envelope = context.createGain();
+    const panner = context.createStereoPanner();
+    panner.pan.value = pan * profile.spread;
+    const peak = (0.0042 + this.currentArousal * 0.0032) * accent;
+    envelope.gain.setValueAtTime(0.0001, start);
+    envelope.gain.exponentialRampToValueAtTime(peak, start + 0.018);
+    envelope.gain.exponentialRampToValueAtTime(peak * 0.32, start + duration * 0.36);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+    oscillator.connect(filter);
+    filter.connect(envelope);
+    envelope.connect(panner);
+    panner.connect(this.sourceBus);
+    oscillator.start(start);
+    oscillator.stop(start + duration + 0.04);
+    this.trackSource(oscillator, [filter, envelope, panner]);
+    this.accompanimentPulseEvents += 1;
+    this.scheduledEvents += 1;
   }
 
   private scheduleMotifNote(

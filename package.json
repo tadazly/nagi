@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "vinext dev",
     "build": "vinext build",
+    "build:static": "NAGI_STATIC_EXPORT=1 next build",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "test:soak": "node --experimental-strip-types scripts/soak-audit.mjs"
