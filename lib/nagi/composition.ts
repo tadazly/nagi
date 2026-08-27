@@ -31,10 +31,25 @@ export type MotifDNA = {
 };
 
 export type MotifEvent = RhythmEvent & {
+  accentedDissonanceAllowed?: boolean;
   cadential?: boolean;
   cycle: number;
+  harmonicIntent?:
+    | 'structural'
+    | 'passing'
+    | 'neighbor'
+    | 'suspension'
+    | 'appoggiatura';
+  mustResolveNext?: boolean;
   motifDegree: number;
   motifIndex: number;
+  phraseRole?:
+    | 'pickup'
+    | 'statement'
+    | 'continuation'
+    | 'climax'
+    | 'cadence'
+    | 'echo';
   voiceRelation?: 'independent' | 'contrary' | 'oblique' | 'response';
 };
 
@@ -122,7 +137,9 @@ export const createMotif = (
   // Familiar material is a structural prior, not a quotation engine. Most
   // motifs come from the corpus model; archetypes are rotated, transposed in
   // scale space and often inverted before they enter the live composition.
-  const useFamiliarTheme = random.next() < 0.18;
+  // Recognisable public-domain DNA is an occasional easter egg rather than a
+  // default stylistic crutch. Most seeds should establish NAGI's own identity.
+  const useFamiliarTheme = random.next() < 0.08;
   const familiarTheme = useFamiliarTheme
     ? chooseFamiliarClassicalTheme(random, mode)
     : null;

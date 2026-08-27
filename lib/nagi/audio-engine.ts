@@ -1,9 +1,9 @@
 import {
   METERS,
+  MODES,
   SeededRandom,
   chordRootMidi,
   chooseChordSpanBars,
-  chooseHarmonyVoiceCount,
   chooseNeighborScene,
   clamp,
   degreeTension,
@@ -15,19 +15,20 @@ import {
   initialEmotionFromSeed,
   interpolateProfile,
   isChordTone,
-  metricStrengthAt,
   midiToFrequency,
   nextSeed,
   phraseHarmonicGoalForFormStage,
   phraseHarmonyEventAtBar,
   planBassLine,
   planPhraseHarmony,
+  planPhraseHarmonyVariation,
   pickMelodyMidi,
   profileFromSeed,
   sceneFromSeed,
   sceneName,
   seedToNumber,
   shapeSceneWithEmotionalForm,
+  shapeSceneWithEmotionalFormMemory,
   smoothstep,
   smootherstep,
   tempoFromArousal,
@@ -42,10 +43,20 @@ import {
 import {
   createMotifPair,
   motifPitchClass,
-  planMotifCounterpoint,
   type MotifDNA,
 } from './composition';
 import {
+  planPhraseMelody,
+  reconcilePhraseCounterpoint,
+  slicePhraseMelody,
+  type CounterpointPairState,
+  type PhraseFormRole,
+  type PhraseMelodicPlan,
+  type PhraseMelodyEvent,
+  type RealizedPhraseMelodyEvent,
+} from './phrase-melody';
+import {
+  INSTRUMENTS,
   articulationName,
   chooseOrchestration,
   choosePerformancePlan,
@@ -56,9 +67,19 @@ import {
   type NoteGesturePlan,
   type OrchestrationPlan,
   type PerformancePlan,
+  type PhraseRole,
   type TimbreRecipe,
   type VoiceExpression,
 } from './performance';
+import {
+  accompanimentEventsForSpan,
+  planPhraseTexture,
+  textureSegmentAtBar,
+  type AccompanimentPattern,
+  type PhraseTexturePlan,
+  type TextureRole,
+  type TextureState,
+} from './texture-planning';
 
 type EngineOptions = {
   debugFast?: boolean;
@@ -97,10 +118,12 @@ export type NagiDiagnostics = {
   counterArticulation: string;
   counterInstrument: string;
   currentSeed: string;
+  formCycleComplete: boolean;
   harmonicScene: string;
   harmonyInstrument: string;
   harmonyLevel: number;
   harmonicVoiceCount: number;
+  soundingChordVoices: number;
   incomingSeed: string | null;
   interaction: number;
   leadMotifCycle: number;
@@ -125,6 +148,9 @@ export type NagiDiagnostics = {
   schedulerRecoveries: number;
   transition: number;
   treble: number;
+  textureRoles: readonly TextureRole[];
+  textureSpotlight: TextureRole;
+  textureState: TextureState;
   valence: number;
   volume: number;
 };
@@ -157,14 +183,36 @@ type TransportState = {
   tension: number;
 };
 
+type ToneLayer = {
+  instrument: InstrumentId;
+  level: number;
+  recipe: TimbreRecipe;
+  wave: PeriodicWave;
+};
+
+type PlannedSourceWindow = {
+  end: number;
+  start: number;
+};
+
 const SCHEDULER_INTERVAL_MS = 120;
 const SCHEDULE_HORIZON_SECONDS = 3.2;
+const MAX_SOURCE_OVERLAP = 40;
+const NOISE_SOURCE_OVERLAP_LIMIT = 30;
+const HARMONY_OVERLAP_LIMIT = 32;
+const BASS_OVERLAP_LIMIT = 34;
+const DUAL_TIMBRE_OVERLAP_LIMIT = 34;
+const ACCOMPANIMENT_OVERLAP_LIMIT = 36;
 export const DEFAULT_VOLUME = 0.72;
 export const MAX_VOLUME = 0.86;
 
 export class NagiAudioEngine {
   private readonly options: EngineOptions;
   private readonly trackedSources = new Set<AudioScheduledSourceNode>();
+  private readonly plannedSourceWindows = new Map<
+    AudioScheduledSourceNode,
+    PlannedSourceWindow
+  >();
   private analyser?: AnalyserNode;
   private analyserData?: Uint8Array<ArrayBuffer>;
   private analyserTimeData?: Float32Array<ArrayBuffer>;
@@ -185,22 +233,27 @@ export class NagiAudioEngine {
   private bassContinuousGestureSeconds = 0;
   private chordDegree = 0;
   private bassLinePlan!: BassLinePlan;
-  private chordsUntilSceneChange = 0;
+  private barsUntilSceneChange = 0;
   private compressor?: DynamicsCompressorNode;
   private context?: AudioContext;
   private currentProfile: WeatherProfile;
   private currentSeed: string;
   private currentVoicing: number[] = [];
+  private currentAPhraseHarmonyPlan: PhraseHarmonicPlan | null = null;
+  private currentAPhraseMelodyPlan: PhraseMelodicPlan | null = null;
   private currentArousal: number;
   private currentValence: number;
+  private counterpointPairState: CounterpointPairState | null = null;
   private dry?: GainNode;
   private effectsBus?: GainNode;
   private emotionalForm: EmotionalFormPlan;
   private filter?: BiquadFilterNode;
   private fastSeedTransition = false;
+  private formCycleComplete = false;
   private formSceneIndex = 0;
   private globalPanner?: StereoPannerNode;
   private harmonicVoiceCount = 3;
+  private soundingChordVoices = 3;
   private harmonyBus?: GainNode;
   private harmonyLevel = 0.92;
   private harmonyContinuousGestureSeconds = 0;
@@ -236,12 +289,22 @@ export class NagiAudioEngine {
   private orchestrationFrom: OrchestrationPlan;
   private orchestrationMix = 1;
   private orchestrationTarget: OrchestrationPlan;
+  private openingHarmonicScene: HarmonicScene;
+  private openingPhraseHarmonyPlan: PhraseHarmonicPlan | null = null;
   private performanceFrom: PerformancePlan;
   private performanceMix = 1;
   private performanceTarget: PerformancePlan;
+  private phraseMelodyPlan!: PhraseMelodicPlan;
+  private phraseOrdinal = 0;
+  private phraseTexturePlan!: PhraseTexturePlan;
   private phraseHarmonyPlan!: PhraseHarmonicPlan;
   private phraseBar = 0;
   private playing = false;
+  private arrangementRandom!: SeededRandom;
+  private openingPhraseMelodyPlan: PhraseMelodicPlan | null = null;
+  private previousAccompanimentPattern: AccompanimentPattern | null = null;
+  private previousPhraseHarmonyPlan: PhraseHarmonicPlan | null = null;
+  private previousPhraseMelodyPlan: PhraseMelodicPlan | null = null;
   private atmosphereRandom!: SeededRandom;
   private harmonyRandom!: SeededRandom;
   private melodyRandom!: SeededRandom;
@@ -263,9 +326,14 @@ export class NagiAudioEngine {
   private timer?: ReturnType<typeof setInterval>;
   private transitionDuration = 0;
   private transitionStartedAt = 0;
+  private activeTextureRoles: readonly TextureRole[] = ['lead', 'harmony', 'bass'];
+  private textureSpotlight: TextureRole = 'lead';
+  private textureState: TextureState = 'chamber';
   private transportTimeline: TransportSegment[] = [];
   private transportTempo: number;
   private leadNeedsResolution = false;
+  private leadResolutionDirection: -1 | 0 | 1 = 0;
+  private leadResolutionMaximumStep = 0;
   private counterNeedsResolution = false;
   private leadMotif: MotifDNA;
   private counterMotif: MotifDNA;
@@ -282,13 +350,13 @@ export class NagiAudioEngine {
       this.emotionalForm,
       0,
     );
+    this.openingHarmonicScene = this.harmonicScene;
     this.resetRandomStreams(seed);
     this.currentArousal = this.harmonicScene.arousal;
     this.currentValence = this.harmonicScene.valence;
     this.targetArousal = this.currentArousal;
     this.targetValence = this.currentValence;
     this.transportTempo = this.harmonicScene.tempo;
-    this.planFormalPhrase(this.harmonicScene);
     const motifPair = createMotifPair(this.melodyRandom, this.harmonicScene);
     this.leadMotif = motifPair.lead;
     this.counterMotif = motifPair.counter;
@@ -306,14 +374,15 @@ export class NagiAudioEngine {
       this.performanceRandom,
     );
     this.performanceTarget = this.performanceFrom;
-    this.chordsUntilSceneChange = options.debugFast
+    this.barsUntilSceneChange = options.debugFast
       ? 2
-      : 7 + Math.floor(this.harmonyRandom.next() * 7);
+      : 12 + Math.floor(this.harmonyRandom.next() * 9);
     this.options = options;
   }
 
   private resetRandomStreams(seed: string) {
     const root = deriveSeedNumber(seed, 'engine');
+    this.arrangementRandom = new SeededRandom(deriveSeedNumber(root, 'arrangement'));
     this.harmonyRandom = new SeededRandom(deriveSeedNumber(root, 'harmony'));
     this.melodyRandom = new SeededRandom(deriveSeedNumber(root, 'melody'));
     this.orchestrationRandom = new SeededRandom(deriveSeedNumber(root, 'orchestration'));
@@ -323,18 +392,93 @@ export class NagiAudioEngine {
     this.waveCache.clear();
   }
 
+  private phraseFormRole(stage: EmotionalFormPlan['stages'][number]): PhraseFormRole {
+    if (stage.id === 'return') return 'A-double-prime';
+    if (stage.id === 'intensification') return 'B';
+    if (stage.id === 'release') return 'A-prime';
+    if (stage.id === 'statement') {
+      return this.openingPhraseMelodyPlan ? 'A-prime' : 'A';
+    }
+    return this.phraseOrdinal % 2 === 0 ? 'B' : 'A-prime';
+  }
+
   private planFormalPhrase(scene: HarmonicScene) {
     const stage = emotionalFormStageAt(this.emotionalForm, this.formSceneIndex);
-    this.phraseHarmonyPlan = planPhraseHarmony(scene, this.harmonyRandom, {
-      goal: phraseHarmonicGoalForFormStage(stage),
-      phraseBars: scene.phraseBars,
-      startDegree: this.chordDegree,
-    });
+    const formRole = this.phraseFormRole(stage);
+    const harmonyReference = formRole === 'A-double-prime'
+      ? this.openingPhraseHarmonyPlan ?? this.previousPhraseHarmonyPlan
+      : formRole === 'A-prime' || formRole === 'B'
+        ? this.currentAPhraseHarmonyPlan ??
+          this.openingPhraseHarmonyPlan ??
+          this.previousPhraseHarmonyPlan
+        : null;
+    this.phraseHarmonyPlan = harmonyReference
+      ? planPhraseHarmonyVariation(scene, harmonyReference, this.harmonyRandom, {
+          goal: phraseHarmonicGoalForFormStage(stage),
+          phraseBars: scene.phraseBars,
+          relationship: formRole,
+          startDegree: this.chordDegree,
+        })
+      : planPhraseHarmony(scene, this.harmonyRandom, {
+          goal: phraseHarmonicGoalForFormStage(stage),
+          phraseBars: scene.phraseBars,
+          startDegree: this.chordDegree,
+        });
+    if (!this.openingPhraseHarmonyPlan && formRole === 'A') {
+      this.openingPhraseHarmonyPlan = this.phraseHarmonyPlan;
+    }
+    if (formRole === 'A') this.currentAPhraseHarmonyPlan = this.phraseHarmonyPlan;
+    this.previousPhraseHarmonyPlan = this.phraseHarmonyPlan;
     this.bassLinePlan = planBassLine(scene, this.phraseHarmonyPlan, this.harmonyRandom, {
       pedalStrength: 0.58 + (1 - scene.arousal) * 0.46,
       previousBassMidi: this.lastBassMidi,
       stepwiseStrength: 0.76 + (1 - scene.tension) * 0.24,
     });
+    const profile = this.getSnapshot().profile;
+    this.phraseTexturePlan = planPhraseTexture(
+      scene,
+      profile,
+      stage,
+      this.arrangementRandom,
+      {
+        harmonyEvents: this.phraseHarmonyPlan.events,
+        phraseBars: scene.phraseBars,
+        previousAccompanimentPattern: this.previousAccompanimentPattern,
+      },
+    );
+    this.previousAccompanimentPattern = this.phraseTexturePlan.accompanimentPattern;
+    const counterSegments = this.phraseTexturePlan.segments.filter((segment) =>
+      segment.activeRoles.includes('counter')
+    );
+    const previousPhrase = formRole === 'A-prime'
+      ? this.currentAPhraseMelodyPlan ??
+        this.openingPhraseMelodyPlan ??
+        this.previousPhraseMelodyPlan
+      : this.previousPhraseMelodyPlan;
+    this.phraseMelodyPlan = planPhraseMelody(
+      scene,
+      this.melodyRandom,
+      this.leadMotif,
+      this.counterMotif,
+      {
+        counterEnabled: counterSegments.length > 0,
+        counterEntryBar: counterSegments[0]?.startBar,
+        counterExitBar: counterSegments.length > 0
+          ? counterSegments.at(-1)!.startBar + counterSegments.at(-1)!.spanBars
+          : undefined,
+        formRole,
+        harmonyPlan: this.phraseHarmonyPlan,
+        openingReference: this.openingPhraseMelodyPlan ?? undefined,
+        previousLeadMidi: this.lastMelodyMidi,
+        previousPhrase: previousPhrase ?? undefined,
+      },
+    );
+    if (!this.openingPhraseMelodyPlan && formRole === 'A') {
+      this.openingPhraseMelodyPlan = this.phraseMelodyPlan;
+    }
+    if (formRole === 'A') this.currentAPhraseMelodyPlan = this.phraseMelodyPlan;
+    this.previousPhraseMelodyPlan = this.phraseMelodyPlan;
+    this.phraseOrdinal += 1;
   }
 
   async start() {
@@ -555,8 +699,7 @@ export class NagiAudioEngine {
       !this.playing ||
       context.state !== 'running' ||
       impulse < 0.12 ||
-      context.currentTime - this.lastInteractionSoundAt < 0.22 + (1 - impulse) * 0.34 ||
-      this.trackedSources.size >= 40
+      context.currentTime - this.lastInteractionSoundAt < 0.22 + (1 - impulse) * 0.34
     ) {
       return;
     }
@@ -653,12 +796,13 @@ export class NagiAudioEngine {
 
   getDiagnostics(): NagiDiagnostics {
     const snapshot = this.getSnapshot();
-    const transport = this.getTransportState(this.context?.currentTime ?? 0);
+    const now = this.context?.currentTime ?? 0;
+    const transport = this.getTransportState(now);
     const performance = this.getPerformancePlan();
     return {
       accompanimentPulseEvents: this.accompanimentPulseEvents,
       accompanimentInstrument: this.getTimbre('accompaniment').label,
-      activeSources: this.trackedSources.size,
+      activeSources: this.activeSourceCountAt(now),
       arousal: this.currentArousal,
       bar: transport.bar,
       barPhase: transport.barPhase,
@@ -673,10 +817,12 @@ export class NagiAudioEngine {
       counterArticulation: articulationName(performance.counter),
       counterInstrument: this.getTimbre('counter').label,
       currentSeed: snapshot.currentSeed,
+      formCycleComplete: this.formCycleComplete,
       harmonicScene: transport.sceneName,
       harmonyInstrument: this.getTimbre('harmony').label,
       harmonyLevel: this.harmonyLevel,
       harmonicVoiceCount: this.harmonicVoiceCount,
+      soundingChordVoices: this.soundingChordVoices,
       incomingSeed: snapshot.incomingSeed,
       interaction: this.bands.interaction,
       leadMotifCycle: this.leadMotif.cycle,
@@ -704,6 +850,9 @@ export class NagiAudioEngine {
       schedulerRecoveries: this.schedulerRecoveries,
       transition: snapshot.transition,
       treble: this.bands.treble,
+      textureRoles: this.activeTextureRoles,
+      textureSpotlight: this.textureSpotlight,
+      textureState: this.textureState,
       valence: this.currentValence,
       volume: this.volume,
     };
@@ -722,6 +871,7 @@ export class NagiAudioEngine {
       source.disconnect();
     }
     this.trackedSources.clear();
+    this.plannedSourceWindows.clear();
     this.transportTimeline = [];
     this.playing = false;
     const context = this.context;
@@ -756,7 +906,7 @@ export class NagiAudioEngine {
     while (this.nextHarmonyAt < horizon) this.scheduleHarmony(this.nextHarmonyAt, false);
     while (this.nextFxAt < horizon) {
       const effectTime = this.snapToSubdivision(this.nextFxAt);
-      if (this.trackedSources.size < 40) this.scheduleAtmosphere(effectTime, profile);
+      this.scheduleAtmosphere(effectTime, profile);
       this.nextFxAt +=
         this.atmosphereRandom.between(13, 28) * (1.16 - profile.density * 0.26);
     }
@@ -859,6 +1009,10 @@ export class NagiAudioEngine {
 
   private updateSeed(now: number) {
     if (this.incomingSeed === null && now >= this.nextSeedAt) {
+      // An automatic weather change must not cut off the first complete formal
+      // arc. Manual Random requests remain immediate because they express an
+      // explicit listener choice.
+      if (!this.formCycleComplete) return;
       this.beginSeedTransition(nextSeed(this.currentSeed), now, false);
       return;
     }
@@ -938,16 +1092,13 @@ export class NagiAudioEngine {
       : this.orchestrationTarget[role];
   }
 
-  private getWave(role: keyof OrchestrationPlan, midi = 60) {
+  private getWaveForInstrument(instrument: InstrumentId, midi = 60) {
     if (!this.context) return undefined;
-    const from = this.orchestrationFrom[role];
-    const to = this.orchestrationTarget[role];
-    const mix = Math.round(this.orchestrationMix * 12) / 12;
     const pitchBucket = Math.round(midi / 3) * 3;
-    const key = `${from}:${to}:${mix.toFixed(2)}:${pitchBucket}`;
+    const key = `${instrument}:${pitchBucket}`;
     const cached = this.waveCache.get(key);
     if (cached) return cached;
-    const recipe = interpolateTimbre(from, to, mix);
+    const recipe = INSTRUMENTS[instrument];
     const real = new Float32Array(recipe.partials.length);
     const imaginary = new Float32Array(recipe.partials.length);
     const fundamental = midiToFrequency(pitchBucket);
@@ -958,7 +1109,7 @@ export class NagiAudioEngine {
       const pitchTilt = Math.exp(-Math.max(0, pitchBucket - 60) * harmonic * 0.0028);
       const amplitude = recipe.partials[harmonic] * antiAlias * pitchTilt;
       const phase =
-        (deriveSeedNumber(0x51f2e9ad, `${from}:${to}:${harmonic}`) / 0x100000000) *
+        (deriveSeedNumber(0x51f2e9ad, `${instrument}:${harmonic}`) / 0x100000000) *
         Math.PI *
         2;
       real[harmonic] = amplitude * Math.cos(phase);
@@ -972,6 +1123,122 @@ export class NagiAudioEngine {
     if (this.waveCache.size >= 384) this.waveCache.clear();
     this.waveCache.set(key, wave);
     return wave;
+  }
+
+  private normalizeSourceWindow(start: number, end: number): PlannedSourceWindow {
+    const safeStart = Math.max(0, start);
+    return {
+      end: Math.max(safeStart + 0.001, end),
+      start: safeStart,
+    };
+  }
+
+  private maxPlannedSourceOverlap(start: number, end: number) {
+    const candidate = this.normalizeSourceWindow(start, end);
+    const events: Array<{ change: -1 | 1; time: number }> = [];
+    for (const window of this.plannedSourceWindows.values()) {
+      const overlapStart = Math.max(candidate.start, window.start);
+      const overlapEnd = Math.min(candidate.end, window.end);
+      if (overlapStart >= overlapEnd) continue;
+      events.push({ change: 1, time: overlapStart });
+      events.push({ change: -1, time: overlapEnd });
+    }
+    events.sort((left, right) =>
+      left.time - right.time || left.change - right.change
+    );
+    let active = 0;
+    let maximum = 0;
+    for (const event of events) {
+      active += event.change;
+      maximum = Math.max(maximum, active);
+    }
+    return maximum;
+  }
+
+  private canScheduleSourceWindow(
+    start: number,
+    end: number,
+    sourceCount = 1,
+    overlapLimit = MAX_SOURCE_OVERLAP,
+  ) {
+    return this.maxPlannedSourceOverlap(start, end) + sourceCount <= overlapLimit;
+  }
+
+  private activeSourceCountAt(at: number) {
+    let active = 0;
+    for (const window of this.plannedSourceWindows.values()) {
+      if (window.start <= at && window.end > at) active += 1;
+    }
+    return active;
+  }
+
+  private sourceOverlapLimitForRole(role: keyof OrchestrationPlan) {
+    if (role === 'harmony') return HARMONY_OVERLAP_LIMIT;
+    if (role === 'bass') return BASS_OVERLAP_LIMIT;
+    if (role === 'accompaniment') return ACCOMPANIMENT_OVERLAP_LIMIT;
+    return MAX_SOURCE_OVERLAP;
+  }
+
+  private getToneLayers(
+    role: keyof OrchestrationPlan,
+    midi: number,
+    sourceStart: number,
+    sourceEnd: number,
+  ): ToneLayer[] {
+    const from = this.orchestrationFrom[role];
+    const to = this.orchestrationTarget[role];
+    const mix = clamp(this.orchestrationMix);
+    const dominant = mix < 0.5 ? from : to;
+    const overlapLimit = this.sourceOverlapLimitForRole(role);
+    const singleLayer = (instrument: InstrumentId): ToneLayer[] => {
+      if (!this.canScheduleSourceWindow(sourceStart, sourceEnd, 1, overlapLimit)) {
+        return [];
+      }
+      const wave = this.getWaveForInstrument(instrument, midi);
+      return wave
+        ? [{ instrument, level: 1, recipe: INSTRUMENTS[instrument], wave }]
+        : [];
+    };
+    if (
+      from === to ||
+      mix <= 0.04 ||
+      mix >= 0.96 ||
+      !this.canScheduleSourceWindow(
+        sourceStart,
+        sourceEnd,
+        2,
+        Math.min(overlapLimit, DUAL_TIMBRE_OVERLAP_LIMIT),
+      )
+    ) {
+      return singleLayer(dominant);
+    }
+    const fromWave = this.getWaveForInstrument(from, midi);
+    const toWave = this.getWaveForInstrument(to, midi);
+    if (!fromWave || !toWave) return singleLayer(dominant);
+    return [
+      {
+        instrument: from,
+        level: Math.cos(mix * Math.PI * 0.5),
+        recipe: INSTRUMENTS[from],
+        wave: fromWave,
+      },
+      {
+        instrument: to,
+        level: Math.sin(mix * Math.PI * 0.5),
+        recipe: INSTRUMENTS[to],
+        wave: toWave,
+      },
+    ];
+  }
+
+  private textureRoleGain(role: TextureRole) {
+    if (!this.activeTextureRoles.includes(role)) return 0;
+    if (this.textureSpotlight === role) return 1.12;
+    return this.activeTextureRoles.length >= 4 ? 0.88 : 0.96;
+  }
+
+  private getWave(role: keyof OrchestrationPlan, midi = 60) {
+    return this.getWaveForInstrument(this.getInstrument(role), midi);
   }
 
   private beginExpressiveTransition(scene: HarmonicScene, profile: WeatherProfile) {
@@ -1073,7 +1340,22 @@ export class NagiAudioEngine {
         if (this.pendingForm) this.emotionalForm = this.pendingForm;
         this.pendingForm = null;
         this.formSceneIndex = 0;
+        this.formCycleComplete = false;
         this.harmonicScene = nextScene;
+        this.openingHarmonicScene = nextScene;
+        this.currentAPhraseHarmonyPlan = null;
+        this.currentAPhraseMelodyPlan = null;
+        this.openingPhraseHarmonyPlan = null;
+        this.openingPhraseMelodyPlan = null;
+        this.previousPhraseHarmonyPlan = null;
+        this.previousPhraseMelodyPlan = null;
+        this.previousAccompanimentPattern = null;
+        this.phraseOrdinal = 0;
+        this.counterpointPairState = null;
+        this.leadNeedsResolution = false;
+        this.counterNeedsResolution = false;
+        this.leadResolutionDirection = 0;
+        this.leadResolutionMaximumStep = 0;
         this.targetArousal = nextScene.arousal;
         this.targetValence = nextScene.valence;
         this.phraseBar = 0;
@@ -1085,13 +1367,17 @@ export class NagiAudioEngine {
         this.counterContinuousGestureSeconds = 0;
         this.pendingScene = null;
         sceneChanged = true;
-        this.chordsUntilSceneChange = this.options.debugFast
+        this.barsUntilSceneChange = this.options.debugFast
           ? 2
-          : 8 + Math.floor(this.harmonyRandom.next() * 7);
-      } else if (this.chordsUntilSceneChange <= 0 && this.phraseBar === 0) {
+          : 12 + Math.floor(this.harmonyRandom.next() * 9);
+      } else if (this.barsUntilSceneChange <= 0 && this.phraseBar === 0) {
         this.formSceneIndex += 1;
-        const nextScene = shapeSceneWithEmotionalForm(
+        this.formCycleComplete ||=
+          this.formSceneIndex >=
+            this.emotionalForm.stages.length * this.emotionalForm.scenesPerStage;
+        const nextScene = shapeSceneWithEmotionalFormMemory(
           chooseNeighborScene(this.harmonicScene, this.harmonyRandom),
+          this.openingHarmonicScene,
           this.emotionalForm,
           this.formSceneIndex,
         );
@@ -1101,9 +1387,9 @@ export class NagiAudioEngine {
         this.targetValence = nextScene.valence;
         this.phraseBar = 0;
         sceneChanged = true;
-        this.chordsUntilSceneChange = this.options.debugFast
+        this.barsUntilSceneChange = this.options.debugFast
           ? 2 + Math.floor(this.harmonyRandom.next() * 2)
-          : 7 + Math.floor(this.harmonyRandom.next() * 8);
+          : 12 + Math.floor(this.harmonyRandom.next() * 13);
       }
     }
 
@@ -1165,15 +1451,29 @@ export class NagiAudioEngine {
     const phraseProgress =
       (this.phraseBar % sceneForChord.phraseBars) /
       Math.max(1, sceneForChord.phraseBars);
-    if (opening || this.phraseBar === 0 || this.harmonyRandom.next() < 0.38) {
-      this.harmonicVoiceCount = chooseHarmonyVoiceCount(
-        sceneForChord,
-        profile.density,
-        phraseProgress,
-        this.harmonicVoiceCount,
-        this.harmonyRandom,
-      );
+    const textureSegment = textureSegmentAtBar(this.phraseTexturePlan, this.phraseBar);
+    const activeRoles = textureSegment?.activeRoles ?? ['lead', 'harmony', 'bass'];
+    this.activeTextureRoles = activeRoles;
+    this.textureSpotlight = textureSegment?.spotlight ?? 'lead';
+    this.textureState = textureSegment?.state ?? 'chamber';
+    if (!activeRoles.includes('lead')) this.leadContinuousGestureSeconds = 0;
+    if (!activeRoles.includes('counter')) {
+      this.counterContinuousGestureSeconds = 0;
+      this.counterpointPairState = null;
     }
+    const bassActive = activeRoles.includes('bass');
+    const harmonyActive = activeRoles.includes('harmony');
+    const accompanimentActive = activeRoles.includes('accompaniment');
+    const upperHarmonyVoiceCount = harmonyActive
+      ? Math.max(1, (textureSegment?.totalChordVoices ?? 3) - (bassActive ? 1 : 0))
+      : 0;
+    this.soundingChordVoices = (bassActive ? 1 : 0) + upperHarmonyVoiceCount;
+    // Voice leading retains one hidden bass anchor even in a bass-less texture;
+    // it is a planning constraint, not necessarily a sounding instrument.
+    this.harmonicVoiceCount = Math.max(
+      1 + upperHarmonyVoiceCount,
+      accompanimentActive ? 3 : 1,
+    );
     this.currentVoicing = voiceLeadChord(
       sceneForChord,
       this.chordDegree,
@@ -1223,77 +1523,93 @@ export class NagiAudioEngine {
       tempo: sceneForChord.tempo,
     });
 
-    const harmonyGesture = planNoteGesture({
-      connectionRandom: this.textureRandom.next(),
-      continuousGestureSeconds: this.harmonyContinuousGestureSeconds,
-      durationSeconds: duration,
-      expression: performance.harmony,
-      instrument: this.getInstrument('harmony'),
-      intervalSemitones: 0,
-      legatoRequested: true,
-      metricStrength: phraseHarmonyEvent?.cadential ? 0.9 : 0.68,
-      phraseProgress,
-      variation: this.textureRandom.between(-0.018, 0.018),
-    });
-    this.harmonyContinuousGestureSeconds =
-      harmonyGesture.boundary.continuousSecondsAfter;
-    this.currentVoicing.slice(1).forEach((midi, index) => {
-      this.schedulePadVoice(
-        start,
-        duration,
-        midi,
-        index,
-        opening,
-        profile,
-        bedBreath,
-        harmonyGesture,
-      );
-    });
-    const previousBassMidi = this.lastBassMidi;
-    const bassMidi = this.currentVoicing[0] ?? chordRootMidi(sceneForChord, this.chordDegree);
-    this.lastBassMidi = bassMidi;
-    this.scheduleBass(
-      start,
-      Math.min(duration * 0.72, barSeconds * 1.3),
-      bassMidi,
-      opening,
-      profile,
-      bedBreath,
-      previousBassMidi,
-      phraseProgress,
-    );
-    if (spanBars >= 3 && this.harmonyRandom.next() < 0.32) {
-      this.scheduleBass(
-        start + (spanBars - 1) * barSeconds,
-        barSeconds * 0.58,
-        bassMidi,
-        false,
-        profile,
-        bedBreath * 0.64,
-        bassMidi,
-        phraseProgress,
-      );
-    }
+    // Reserve the finite source budget for the phrase-bearing voices first.
+    // Sustained beds, bass reinforcement, handoff layers, noise, and finally
+    // accompaniment degrade around them instead of truncating the melody.
     this.scheduleMelodicVoices(
       start,
       beatSeconds,
       spanBars,
       sceneForChord,
       profile,
-      opening,
+      activeRoles,
     );
-    this.scheduleAccompaniment(
-      start,
-      beatSeconds,
-      spanBars,
-      sceneForChord,
-      profile,
-    );
+
+    if (harmonyActive) {
+      const harmonyGesture = planNoteGesture({
+        connectionRandom: this.textureRandom.next(),
+        continuousGestureSeconds: this.harmonyContinuousGestureSeconds,
+        durationSeconds: duration,
+        expression: performance.harmony,
+        instrument: this.getInstrument('harmony'),
+        intervalSemitones: 0,
+        legatoRequested: true,
+        metricStrength: phraseHarmonyEvent?.cadential ? 0.9 : 0.68,
+        phraseProgress,
+        variation: this.textureRandom.between(-0.018, 0.018),
+      });
+      this.harmonyContinuousGestureSeconds =
+        harmonyGesture.boundary.continuousSecondsAfter;
+      this.currentVoicing
+        .slice(1, 1 + upperHarmonyVoiceCount)
+        .forEach((midi, index) => {
+          this.schedulePadVoice(
+            start,
+            duration,
+            midi,
+            index,
+            opening,
+            profile,
+            bedBreath,
+            harmonyGesture,
+          );
+        });
+    } else {
+      this.harmonyContinuousGestureSeconds = 0;
+    }
+    const bassMidi = this.currentVoicing[0] ?? chordRootMidi(sceneForChord, this.chordDegree);
+    if (bassActive) {
+      const previousBassMidi = this.lastBassMidi;
+      this.lastBassMidi = bassMidi;
+      this.scheduleBass(
+        start,
+        Math.min(duration * 0.72, barSeconds * 1.3),
+        bassMidi,
+        opening,
+        profile,
+        bedBreath,
+        previousBassMidi,
+        phraseProgress,
+      );
+      if (spanBars >= 3 && this.harmonyRandom.next() < 0.32) {
+        this.scheduleBass(
+          start + (spanBars - 1) * barSeconds,
+          barSeconds * 0.58,
+          bassMidi,
+          false,
+          profile,
+          bedBreath * 0.64,
+          bassMidi,
+          phraseProgress,
+        );
+      }
+    } else {
+      this.bassContinuousGestureSeconds = 0;
+    }
+    if (accompanimentActive) {
+      this.scheduleAccompaniment(
+        start,
+        beatSeconds,
+        spanBars,
+        sceneForChord,
+        profile,
+      );
+    }
     this.nextHarmonyAt = start + duration;
     this.advanceExpressiveTransition(spanBars, sceneForChord.phraseBars);
     this.scheduledBars += spanBars;
     this.phraseBar = (this.phraseBar + spanBars) % sceneForChord.phraseBars;
-    this.chordsUntilSceneChange -= 1;
+    this.barsUntilSceneChange -= spanBars;
   }
 
   private schedulePadVoice(
@@ -1311,27 +1627,20 @@ export class NagiAudioEngine {
     const recipe = this.getTimbre('harmony');
     const expressionState = this.getPerformancePlan().harmony;
     const performanceStart = start + gesture.boundary.breakBeforeSeconds;
-    const wave = this.getWave('harmony', midi);
-    if (!wave) return;
-    const oscillator = context.createOscillator();
-    oscillator.setPeriodicWave(wave);
-    oscillator.frequency.setValueAtTime(midiToFrequency(midi), performanceStart);
-    const detune = this.textureRandom.between(-1.25, 1.25);
-    this.scheduleVibrato(
-      oscillator.detune,
-      performanceStart,
-      duration,
-      recipe,
-      expressionState,
-      detune,
-      gesture.vibrato,
-    );
-
     const filter = context.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value =
+    const padCutoff =
       (620 + profile.brightness * 980 + this.currentArousal * 220 + index * 68) *
       (0.72 + recipe.brightness * 0.54);
+    filter.frequency.setValueAtTime(padCutoff, performanceStart);
+    filter.frequency.exponentialRampToValueAtTime(
+      padCutoff * (1.04 + gesture.dynamic * 0.055),
+      performanceStart + Math.max(0.08, duration * 0.56),
+    );
+    filter.frequency.exponentialRampToValueAtTime(
+      padCutoff * 0.94,
+      performanceStart + Math.max(0.12, duration),
+    );
     filter.Q.value = 0.2 + profile.warmth * 0.18;
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
@@ -1361,7 +1670,35 @@ export class NagiAudioEngine {
       (opening ? 0.017 : 0.0125) *
       (0.86 + profile.density * 0.24) *
       bedBreath *
-      gesture.dynamic;
+      gesture.dynamic *
+      this.textureRoleGain('harmony');
+    const sourceStart = Math.max(context.currentTime + 0.001, performanceStart - 0.008);
+    const sourceEnd = end + 0.025;
+    const toneLayers = this.getToneLayers('harmony', midi, sourceStart, sourceEnd);
+    if (toneLayers.length === 0) return;
+    const toneMixer = context.createGain();
+    const oscillators = toneLayers.map((layer) => {
+      const oscillator = context.createOscillator();
+      const layerGain = context.createGain();
+      oscillator.setPeriodicWave(layer.wave);
+      oscillator.frequency.setValueAtTime(midiToFrequency(midi), performanceStart);
+      layerGain.gain.value = layer.level;
+      oscillator.connect(layerGain);
+      layerGain.connect(toneMixer);
+      return { layer, layerGain, oscillator };
+    });
+    const detune = this.textureRandom.between(-1.25, 1.25);
+    oscillators.forEach(({ layer, oscillator }) => {
+      this.scheduleVibrato(
+        oscillator.detune,
+        performanceStart,
+        duration,
+        layer.recipe,
+        expressionState,
+        detune,
+        gesture.vibrato,
+      );
+    });
     envelope.gain.setValueAtTime(0, Math.max(0, performanceStart - 0.008));
     envelope.gain.setValueAtTime(0, performanceStart);
     envelope.gain.linearRampToValueAtTime(peak, performanceStart + attack);
@@ -1369,13 +1706,20 @@ export class NagiAudioEngine {
     envelope.gain.exponentialRampToValueAtTime(0.00001, end - 0.006);
     envelope.gain.linearRampToValueAtTime(0, end);
 
-    oscillator.connect(filter);
+    toneMixer.connect(filter);
     filter.connect(envelope);
     envelope.connect(panner);
     panner.connect(this.harmonyBus);
-    oscillator.start(Math.max(context.currentTime + 0.001, performanceStart - 0.008));
-    oscillator.stop(end + 0.025);
-    this.trackSource(oscillator, [filter, envelope, panner]);
+    oscillators.forEach(({ oscillator }) => {
+      oscillator.start(sourceStart);
+      oscillator.stop(sourceEnd);
+    });
+    this.trackSourceGroup(
+      oscillators.map(({ oscillator }) => oscillator),
+      [toneMixer, ...oscillators.map(({ layerGain }) => layerGain), filter, envelope, panner],
+      sourceStart,
+      sourceEnd,
+    );
     this.scheduleTimbreNoise(
       performanceStart,
       Math.min(sustainDuration + release, 3.2),
@@ -1410,44 +1754,32 @@ export class NagiAudioEngine {
       expression: expressionState,
       instrument: this.getInstrument('bass'),
       intervalSemitones: midi - previousMidi,
-      legatoRequested: expressionState.articulation > 0.94,
+      legatoRequested:
+        this.bassContinuousGestureSeconds > 0 && expressionState.articulation > 0.94,
       metricStrength: accent,
       phraseProgress,
       variation: this.textureRandom.between(-0.018, 0.018),
     });
     this.bassContinuousGestureSeconds = gesture.boundary.continuousSecondsAfter;
     const performanceStart = start + gesture.boundary.breakBeforeSeconds;
-    const wave = this.getWave('bass', midi);
-    if (!wave) return;
-    const oscillator = context.createOscillator();
-    oscillator.setPeriodicWave(wave);
-    if (gesture.connection.kind === 'portamento' && gesture.connection.glideSeconds > 0) {
-      oscillator.frequency.setValueAtTime(midiToFrequency(previousMidi), performanceStart);
-      oscillator.frequency.exponentialRampToValueAtTime(
-        midiToFrequency(midi),
-        performanceStart + gesture.connection.glideSeconds,
-      );
-    } else {
-      oscillator.frequency.setValueAtTime(midiToFrequency(midi), performanceStart);
-    }
-    this.scheduleVibrato(
-      oscillator.detune,
-      performanceStart,
-      duration,
-      recipe,
-      expressionState,
-      this.textureRandom.between(-0.8, 0.8),
-      gesture.vibrato,
-    );
-    const filter = context.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value =
-      (270 + profile.warmth * 260) * (0.76 + recipe.brightness * 0.62);
-    const envelope = context.createGain();
     const body = Math.max(
       0.3,
       duration * gesture.articulation + gesture.connection.overlapSeconds,
     );
+    const filter = context.createBiquadFilter();
+    filter.type = 'lowpass';
+    const bassCutoff =
+      (270 + profile.warmth * 260) * (0.76 + recipe.brightness * 0.62);
+    filter.frequency.setValueAtTime(bassCutoff, performanceStart);
+    filter.frequency.exponentialRampToValueAtTime(
+      bassCutoff * (1.03 + gesture.dynamic * 0.045),
+      performanceStart + Math.max(0.06, body * 0.52),
+    );
+    filter.frequency.exponentialRampToValueAtTime(
+      bassCutoff * 0.91,
+      performanceStart + Math.max(0.1, body),
+    );
+    const envelope = context.createGain();
     const idiomaticRelease = gesture.decay.kind === 'natural'
       ? Math.min(recipe.release, gesture.decay.naturalDecaySeconds)
       : recipe.release;
@@ -1455,7 +1787,43 @@ export class NagiAudioEngine {
     const end = performanceStart + body + release;
     const attack = Math.min(body * 0.42, recipe.attack * gesture.attackScale);
     const peak =
-      (0.017 + profile.warmth * 0.006) * accent * gesture.dynamic;
+      (0.017 + profile.warmth * 0.006) *
+      accent *
+      gesture.dynamic *
+      this.textureRoleGain('bass');
+    const sourceStart = Math.max(context.currentTime + 0.001, performanceStart - 0.008);
+    const sourceEnd = end + 0.025;
+    const toneLayers = this.getToneLayers('bass', midi, sourceStart, sourceEnd);
+    if (toneLayers.length === 0) return;
+    const toneMixer = context.createGain();
+    const baseDetune = this.textureRandom.between(-0.8, 0.8);
+    const oscillators = toneLayers.map((layer) => {
+      const oscillator = context.createOscillator();
+      const layerGain = context.createGain();
+      oscillator.setPeriodicWave(layer.wave);
+      if (gesture.connection.kind === 'portamento' && gesture.connection.glideSeconds > 0) {
+        oscillator.frequency.setValueAtTime(midiToFrequency(previousMidi), performanceStart);
+        oscillator.frequency.exponentialRampToValueAtTime(
+          midiToFrequency(midi),
+          performanceStart + gesture.connection.glideSeconds,
+        );
+      } else {
+        oscillator.frequency.setValueAtTime(midiToFrequency(midi), performanceStart);
+      }
+      this.scheduleVibrato(
+        oscillator.detune,
+        performanceStart,
+        duration,
+        layer.recipe,
+        expressionState,
+        baseDetune,
+        gesture.vibrato,
+      );
+      layerGain.gain.value = layer.level;
+      oscillator.connect(layerGain);
+      layerGain.connect(toneMixer);
+      return { layerGain, oscillator };
+    });
     envelope.gain.setValueAtTime(0, Math.max(0, performanceStart - 0.008));
     envelope.gain.setValueAtTime(0, performanceStart);
     envelope.gain.linearRampToValueAtTime(
@@ -1469,12 +1837,19 @@ export class NagiAudioEngine {
     );
     envelope.gain.exponentialRampToValueAtTime(0.00001, end - 0.006);
     envelope.gain.linearRampToValueAtTime(0, end);
-    oscillator.connect(filter);
+    toneMixer.connect(filter);
     filter.connect(envelope);
     envelope.connect(this.harmonyBus);
-    oscillator.start(Math.max(context.currentTime + 0.001, performanceStart - 0.008));
-    oscillator.stop(end + 0.025);
-    this.trackSource(oscillator, [filter, envelope]);
+    oscillators.forEach(({ oscillator }) => {
+      oscillator.start(sourceStart);
+      oscillator.stop(sourceEnd);
+    });
+    this.trackSourceGroup(
+      oscillators.map(({ oscillator }) => oscillator),
+      [toneMixer, ...oscillators.map(({ layerGain }) => layerGain), filter, envelope],
+      sourceStart,
+      sourceEnd,
+    );
     this.scheduleTimbreNoise(
       performanceStart,
       Math.min(body + release, 2.4),
@@ -1494,24 +1869,22 @@ export class NagiAudioEngine {
     spanBars: number,
     scene: HarmonicScene,
     profile: WeatherProfile,
-    opening: boolean,
+    activeRoles: readonly TextureRole[],
   ) {
     if (!this.context || !this.effectsBus) return;
     const meter = METERS[scene.meterIndex];
-    const includeCounter = profile.density > 0.43 &&
-      (opening || this.melodyRandom.next() < 0.35 + this.currentArousal * 0.36);
-    const counterpoint = planMotifCounterpoint(
-      scene,
-      spanBars,
-      this.melodyRandom,
-      this.leadMotif,
-      this.counterMotif,
+    const melodicSlice = slicePhraseMelody(
+      this.phraseMelodyPlan,
       this.phraseBar,
-      includeCounter,
-      opening,
+      spanBars,
+      meter.beatsPerBar,
     );
-    const leadEvents = counterpoint.leadEvents;
-    const counterEvents = counterpoint.counterEvents;
+    const leadEvents: PhraseMelodyEvent[] = activeRoles.includes('lead')
+      ? [...melodicSlice.leadEvents]
+      : [];
+    const counterEvents: PhraseMelodyEvent[] = activeRoles.includes('counter')
+      ? [...melodicSlice.counterEvents]
+      : [];
     const totalChordBeats = meter.beatsPerBar * spanBars;
     const phraseEndsWithChord = this.phraseBar + spanBars >= scene.phraseBars;
     const melodicTimeline = [
@@ -1530,84 +1903,186 @@ export class NagiAudioEngine {
     ].sort((a, b) => a.event.beat - b.event.beat || (a.role === 'lead' ? -1 : 1));
     let localLeadMidi = this.lastMelodyMidi;
     let localCounterMidi = this.lastCounterMidi;
+    let localLeadNeedsResolution = this.leadNeedsResolution;
+    let localCounterNeedsResolution = this.counterNeedsResolution;
+    let localLeadResolutionDirection = this.leadResolutionDirection;
+    let localLeadResolutionMaximumStep = this.leadResolutionMaximumStep;
+    const harmonyNotes = activeRoles.includes('harmony')
+      ? this.currentVoicing.slice(1)
+      : [];
+    const soundingBassMidi = activeRoles.includes('bass')
+      ? this.currentVoicing[0] ?? chordRootMidi(scene, this.chordDegree)
+      : undefined;
+    type PendingMelody = {
+      event: PhraseMelodyEvent;
+      index: number;
+      midi: number;
+      role: 'lead' | 'counter';
+      voiceEventCount: number;
+    };
+    const pending: PendingMelody[] = [];
 
     for (const item of melodicTimeline) {
-        const { event, index, role, voiceEventCount } = item;
-        if (this.trackedSources.size >= 40) break;
-        const phraseProgress =
-          ((this.phraseBar + event.beat / meter.beatsPerBar) % scene.phraseBars) /
-          scene.phraseBars;
-        const contour = Math.sin(phraseProgress * Math.PI * 2 + scene.tension * Math.PI);
-        const direction: -1 | 0 | 1 = contour > 0.16 ? 1 : contour < -0.16 ? -1 : 0;
-        const previous = role === 'lead' ? localLeadMidi : localCounterMidi;
-        const mustResolve = role === 'lead'
-          ? this.leadNeedsResolution
-          : this.counterNeedsResolution;
-        // A performer does not cadence at every harmony change. Preserve
-        // suspensions and passing tones across chord boundaries; apply strong
-        // resolution pressure only at the actual end of the formal phrase.
-        const cadenceSoon = phraseEndsWithChord && (
-          event.beat + event.durationBeats >= totalChordBeats - 0.5 ||
-          index === voiceEventCount - 1
-        );
-        const targetMidi =
-          (role === 'lead' ? 70 : 62) + contour * (role === 'lead' ? 4.2 : 3.1);
-        const targetPitchClass = motifPitchClass(scene, event.motifDegree);
-        const bassMidi = this.currentVoicing[0] ?? chordRootMidi(scene, this.chordDegree);
-        const backgroundNotes = [...this.currentVoicing];
-        const midi = pickMelodyMidi(
-          scene,
-          this.chordDegree,
-          previous,
-          this.melodyRandom,
-          {
-            backgroundNotes,
-            bassMidi,
-            direction,
-            metricStrength: event.metricStrength,
-            mustResolve: mustResolve || cadenceSoon,
-            otherVoiceMidi: role === 'counter' ? localLeadMidi : localCounterMidi,
-            registerHigh: role === 'lead' ? 84 : 74,
-            registerLow: role === 'lead' ? 60 : 52,
-            targetMidi,
-            targetPitchClass,
-          },
-        );
-        if (role === 'lead') {
-          this.leadNoteEvents += 1;
-          localLeadMidi = midi;
-          this.lastMelodyMidi = midi;
-          this.leadNeedsResolution = !isChordTone(scene, this.chordDegree, midi);
-        } else {
-          this.counterNoteEvents += 1;
-          localCounterMidi = midi;
-          this.lastCounterMidi = midi;
-          this.counterNeedsResolution = !isChordTone(scene, this.chordDegree, midi);
+      const { event, index, role, voiceEventCount } = item;
+      const previous = role === 'lead' ? localLeadMidi : localCounterMidi;
+      const mustResolve = role === 'lead'
+        ? localLeadNeedsResolution
+        : localCounterNeedsResolution;
+      const cadenceArrival = phraseEndsWithChord &&
+        event.phraseRole === 'cadence' &&
+        !event.mustResolveNext &&
+        index === voiceEventCount - 1;
+      const plannedTargetMidi = event.retainPreviousPitch
+        ? previous
+        : event.targetMidi;
+      const directionDelta = plannedTargetMidi - previous;
+      const plannedDirection: -1 | 0 | 1 = directionDelta > 0.8
+        ? 1
+        : directionDelta < -0.8
+          ? -1
+          : 0;
+      const direction = role === 'lead' && mustResolve && localLeadResolutionDirection !== 0
+        ? localLeadResolutionDirection
+        : plannedDirection;
+      const targetPitchClass = event.retainPreviousPitch
+        ? ((previous % 12) + 12) % 12
+        : motifPitchClass(scene, event.motifDegree);
+      const midi = pickMelodyMidi(
+        scene,
+        this.chordDegree,
+        previous,
+        this.melodyRandom,
+        {
+          allowAccentedDissonance: event.accentedDissonanceAllowed,
+          backgroundNotes: [
+            ...(soundingBassMidi === undefined ? [] : [soundingBassMidi]),
+            ...harmonyNotes,
+          ],
+          bassMidi: soundingBassMidi,
+          direction,
+          maximumInterval: role === 'lead' && mustResolve
+            ? localLeadResolutionMaximumStep || 2
+            : undefined,
+          metricStrength: event.metricStrength,
+          mustResolve: mustResolve || cadenceArrival,
+          otherVoiceMidi: role === 'counter'
+            ? localLeadMidi
+            : counterEvents.length > 0
+              ? localCounterMidi
+              : undefined,
+          registerHigh: role === 'lead'
+            ? this.phraseMelodyPlan.registerArc.leadHighMidi
+            : this.phraseMelodyPlan.registerArc.counterHighMidi,
+          registerLow: role === 'lead'
+            ? this.phraseMelodyPlan.registerArc.leadLowMidi
+            : this.phraseMelodyPlan.registerArc.counterLowMidi,
+          phraseRole: event.phraseRole,
+          targetMidi: plannedTargetMidi,
+          targetPitchClass,
+        },
+      );
+      const chordTone = isChordTone(scene, this.chordDegree, midi);
+      if (role === 'lead') {
+        localLeadMidi = midi;
+        localLeadNeedsResolution = !chordTone || event.mustResolveNext;
+        if (event.mustResolveNext) {
+          localLeadResolutionDirection = event.resolutionDirection;
+          localLeadResolutionMaximumStep = event.resolutionMaximumStep;
+        } else if (mustResolve) {
+          localLeadResolutionDirection = 0;
+          localLeadResolutionMaximumStep = 0;
         }
-        const humanizeSeconds = event.humanizeBeats * beatSeconds;
-        this.maxHumanizeMs = Math.max(this.maxHumanizeMs, Math.abs(humanizeSeconds) * 1000);
-        const noteStart = Math.max(
-          start + 0.035,
-          start + event.beat * beatSeconds + humanizeSeconds,
-        );
-        const maximumDuration = Math.max(
-          0.42,
-          start + totalChordBeats * beatSeconds + 0.58 - noteStart,
-        );
-        this.scheduleMotifNote(
-          noteStart,
-          midi,
-          previous,
-          profile,
-          index,
-          voiceEventCount,
-          role,
-          event.accent,
-          event.metricStrength,
-          event.durationBeats * beatSeconds,
-          maximumDuration,
-          phraseProgress,
-        );
+      } else {
+        localCounterMidi = midi;
+        localCounterNeedsResolution = !chordTone || event.mustResolveNext;
+      }
+      pending.push({ event, index, midi, role, voiceEventCount });
+    }
+
+    const realizedLead = pending
+      .filter((item) => item.role === 'lead')
+      .map((item): RealizedPhraseMelodyEvent => ({ ...item.event, midi: item.midi }));
+    const realizedCounter = pending
+      .filter((item) => item.role === 'counter')
+      .map((item): RealizedPhraseMelodyEvent => ({ ...item.event, midi: item.midi }));
+    const reconciled = reconcilePhraseCounterpoint(realizedLead, realizedCounter, {
+      allowedPitchClasses: MODES[scene.modeIndex].intervals.map((interval) =>
+        (scene.tonic + interval) % 12),
+      counterHighMidi: this.phraseMelodyPlan.registerArc.counterHighMidi,
+      counterLowMidi: this.phraseMelodyPlan.registerArc.counterLowMidi,
+      minimumVoiceGapSemitones: 3,
+      previousPair: this.counterpointPairState,
+    });
+    let leadScheduleIndex = 0;
+    let counterScheduleIndex = 0;
+    let scheduledLeadPrevious = this.lastMelodyMidi;
+    let scheduledCounterPrevious = this.lastCounterMidi;
+    const schedulingOrder = [...pending].sort((left, right) =>
+      left.role === right.role
+        ? left.event.beat - right.event.beat
+        : left.role === 'lead'
+          ? -1
+          : 1
+    );
+    for (const item of schedulingOrder) {
+      const corrected = item.role === 'lead'
+        ? reconciled.leadEvents[leadScheduleIndex++]
+        : reconciled.counterEvents[counterScheduleIndex++];
+      const midi = corrected?.midi ?? item.midi;
+      const soundingPrevious = item.role === 'lead'
+        ? scheduledLeadPrevious
+        : scheduledCounterPrevious;
+      const humanizeSeconds = item.event.humanizeBeats * beatSeconds;
+      this.maxHumanizeMs = Math.max(
+        this.maxHumanizeMs,
+        Math.abs(humanizeSeconds) * 1000,
+      );
+      const noteStart = Math.max(
+        start + 0.035,
+        start + item.event.beat * beatSeconds + humanizeSeconds,
+      );
+      const maximumDuration = Math.max(
+        0.42,
+        start + totalChordBeats * beatSeconds + 0.58 - noteStart,
+      );
+      const scheduled = this.scheduleMotifNote(
+        noteStart,
+        midi,
+        soundingPrevious,
+        profile,
+        item.index,
+        item.voiceEventCount,
+        item.role,
+        item.event.accent,
+        item.event.metricStrength,
+        item.event.durationBeats * beatSeconds,
+        maximumDuration,
+        item.event.phrasePosition,
+        item.event.phraseRole,
+      );
+      if (!scheduled) continue;
+      if (item.role === 'lead') {
+        this.leadNoteEvents += 1;
+        this.lastMelodyMidi = midi;
+        scheduledLeadPrevious = midi;
+        this.leadNeedsResolution =
+          !isChordTone(scene, this.chordDegree, midi) || item.event.mustResolveNext;
+        this.leadResolutionDirection = item.event.mustResolveNext
+          ? item.event.resolutionDirection
+          : 0;
+        this.leadResolutionMaximumStep = item.event.mustResolveNext
+          ? item.event.resolutionMaximumStep
+          : 0;
+      } else {
+        this.counterNoteEvents += 1;
+        this.lastCounterMidi = midi;
+        scheduledCounterPrevious = midi;
+        this.counterNeedsResolution =
+          !isChordTone(scene, this.chordDegree, midi) || item.event.mustResolveNext;
+      }
+    }
+    if (reconciled.counterEvents.length > 0) {
+      this.counterpointPairState = reconciled.terminalPair;
     }
   }
 
@@ -1621,44 +2096,28 @@ export class NagiAudioEngine {
     if (!this.context || !this.harmonyBus || this.currentVoicing.length < 2) return;
     const meter = METERS[scene.meterIndex];
     const accompanimentVoicing = this.currentVoicing.slice(1);
-    for (let bar = 0; bar < spanBars; bar += 1) {
-      for (let beat = 0; beat < meter.beatsPerBar; beat += 1) {
-        const strength = metricStrengthAt(meter, beat);
-        if (scene.arousal < 0.34 && strength < 0.58) continue;
-        const noteIndex =
-          (bar * meter.beatsPerBar + beat + this.chordDegree) %
-          accompanimentVoicing.length;
-        let midi = accompanimentVoicing[noteIndex];
-        if (midi > 74) midi -= 12;
-        this.scheduleHarmonicPulse(
-          start + (bar * meter.beatsPerBar + beat) * beatSeconds,
-          beatSeconds * (0.42 + (1 - scene.arousal) * 0.16),
-          midi,
-          0.52 + strength * 0.48,
-          profile,
-          beat % 2 === 0 ? -0.16 : 0.16,
-          ((this.phraseBar + bar + beat / meter.beatsPerBar) % scene.phraseBars) /
-            scene.phraseBars,
-        );
-        if (
-          scene.arousal > 0.78 &&
-          (beat + bar) % 2 === 0 &&
-          this.trackedSources.size < 38
-        ) {
-          const upper = accompanimentVoicing[(noteIndex + 1) % accompanimentVoicing.length];
-          this.scheduleHarmonicPulse(
-            start + (bar * meter.beatsPerBar + beat + 0.5) * beatSeconds,
-            beatSeconds * 0.28,
-            upper,
-            0.34,
-            profile,
-            beat % 2 === 0 ? 0.2 : -0.2,
-            ((this.phraseBar + bar + (beat + 0.5) / meter.beatsPerBar) %
-              scene.phraseBars) /
-              scene.phraseBars,
-          );
-        }
-      }
+    const events = accompanimentEventsForSpan(
+      this.phraseTexturePlan.accompanimentPattern,
+      scene.meterIndex,
+      this.phraseBar,
+      spanBars,
+    );
+    for (const [eventIndex, event] of events.entries()) {
+      const noteIndex = (
+        event.voicingOffset + this.chordDegree
+      ) % accompanimentVoicing.length;
+      let midi = accompanimentVoicing[noteIndex];
+      if (midi > 74) midi -= 12;
+      const absolutePhraseBeat = this.phraseBar * meter.beatsPerBar + event.beatOffset;
+      this.scheduleHarmonicPulse(
+        start + event.beatOffset * beatSeconds,
+        event.durationBeats * beatSeconds,
+        midi,
+        event.accent,
+        profile,
+        eventIndex % 2 === 0 ? -0.16 : 0.16,
+        (absolutePhraseBeat / meter.beatsPerBar) / scene.phraseBars,
+      );
     }
   }
 
@@ -1671,7 +2130,7 @@ export class NagiAudioEngine {
     pan: number,
     phraseProgress: number,
   ) {
-    if (!this.context || !this.harmonyBus || this.trackedSources.size >= 38) return;
+    if (!this.context || !this.harmonyBus) return;
     const context = this.context;
     const recipe = this.getTimbre('accompaniment');
     const expressionState = this.getPerformancePlan().accompaniment;
@@ -1686,15 +2145,15 @@ export class NagiAudioEngine {
       phraseProgress,
       variation: this.textureRandom.between(-0.025, 0.025),
     });
-    const wave = this.getWave('accompaniment', midi);
-    if (!wave) return;
-    const oscillator = context.createOscillator();
-    oscillator.setPeriodicWave(wave);
-    oscillator.frequency.setValueAtTime(midiToFrequency(midi), start);
     const filter = context.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value =
+    const pulseCutoff =
       (820 + profile.brightness * 1160) * (0.7 + recipe.brightness * 0.62);
+    filter.frequency.setValueAtTime(pulseCutoff, start);
+    filter.frequency.exponentialRampToValueAtTime(
+      pulseCutoff * 0.76,
+      start + Math.max(0.05, duration),
+    );
     filter.Q.value = 0.22;
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
@@ -1709,7 +2168,31 @@ export class NagiAudioEngine {
     );
     const end = start + body + release;
     const dynamic = gesture.dynamic;
-    const peak = (0.0042 + this.currentArousal * 0.0032) * accent * dynamic;
+    const peak =
+      (0.0042 + this.currentArousal * 0.0032) *
+      accent *
+      dynamic *
+      this.textureRoleGain('accompaniment');
+    const sourceStart = Math.max(context.currentTime + 0.001, start - 0.008);
+    const sourceEnd = end + 0.025;
+    const toneLayers = this.getToneLayers(
+      'accompaniment',
+      midi,
+      sourceStart,
+      sourceEnd,
+    );
+    if (toneLayers.length === 0) return;
+    const toneMixer = context.createGain();
+    const oscillators = toneLayers.map((layer) => {
+      const oscillator = context.createOscillator();
+      const layerGain = context.createGain();
+      oscillator.setPeriodicWave(layer.wave);
+      oscillator.frequency.setValueAtTime(midiToFrequency(midi), start);
+      layerGain.gain.value = layer.level;
+      oscillator.connect(layerGain);
+      layerGain.connect(toneMixer);
+      return { layerGain, oscillator };
+    });
     const attack = Math.min(body * 0.32, recipe.attack * gesture.attackScale);
     envelope.gain.setValueAtTime(0, Math.max(0, start - 0.008));
     envelope.gain.setValueAtTime(0, start);
@@ -1720,13 +2203,20 @@ export class NagiAudioEngine {
     );
     envelope.gain.exponentialRampToValueAtTime(0.00001, end - 0.006);
     envelope.gain.linearRampToValueAtTime(0, end);
-    oscillator.connect(filter);
+    toneMixer.connect(filter);
     filter.connect(envelope);
     envelope.connect(panner);
     panner.connect(this.harmonyBus);
-    oscillator.start(Math.max(context.currentTime + 0.001, start - 0.008));
-    oscillator.stop(end + 0.025);
-    this.trackSource(oscillator, [filter, envelope, panner]);
+    oscillators.forEach(({ oscillator }) => {
+      oscillator.start(sourceStart);
+      oscillator.stop(sourceEnd);
+    });
+    this.trackSourceGroup(
+      oscillators.map(({ oscillator }) => oscillator),
+      [toneMixer, ...oscillators.map(({ layerGain }) => layerGain), filter, envelope, panner],
+      sourceStart,
+      sourceEnd,
+    );
     this.scheduleTimbreNoise(
       start,
       Math.min(duration + release, 1.8),
@@ -1754,12 +2244,13 @@ export class NagiAudioEngine {
     rhythmicDuration: number,
     maximumDuration: number,
     phraseProgress: number,
+    phraseRole: PhraseRole,
   ) {
     if (
       !this.context ||
       !this.effectsBus ||
       !this.melodyBus
-    ) return;
+    ) return false;
     const context = this.context;
     const recipe = this.getTimbre(role);
     const expressionState = this.getPerformancePlan()[role];
@@ -1774,52 +2265,14 @@ export class NagiAudioEngine {
       expression: expressionState,
       instrument,
       intervalSemitones: midi - previousMidi,
-      legatoRequested: expressionState.articulation > 0.94,
+      legatoRequested:
+        continuousGestureSeconds > 0 && expressionState.articulation > 0.94,
       metricStrength,
       phraseProgress,
+      phraseRole,
       variation: this.textureRandom.between(-0.025, 0.025),
     });
-    if (role === 'lead') {
-      this.leadContinuousGestureSeconds = gesture.boundary.continuousSecondsAfter;
-    } else {
-      this.counterContinuousGestureSeconds = gesture.boundary.continuousSecondsAfter;
-    }
     const performanceStart = start + gesture.boundary.breakBeforeSeconds;
-    const wave = this.getWave(role, midi);
-    if (!wave) return;
-    const oscillator = context.createOscillator();
-    oscillator.setPeriodicWave(wave);
-    const frequency = midiToFrequency(midi);
-    if (gesture.connection.kind === 'portamento' && gesture.connection.glideSeconds > 0) {
-      oscillator.frequency.setValueAtTime(midiToFrequency(previousMidi), performanceStart);
-      oscillator.frequency.exponentialRampToValueAtTime(
-        frequency,
-        performanceStart + gesture.connection.glideSeconds,
-      );
-    } else {
-      oscillator.frequency.setValueAtTime(frequency, performanceStart);
-    }
-    const filter = context.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value =
-      ((role === 'lead' ? 1420 : 1050) +
-        profile.brightness * (role === 'lead' ? 2300 : 1700)) *
-      (0.72 + recipe.brightness * 0.58);
-    filter.Q.value = role === 'lead' ? 0.34 : 0.28;
-    const highpass = context.createBiquadFilter();
-    highpass.type = 'highpass';
-    highpass.frequency.value = role === 'lead' ? 260 : 190;
-    highpass.Q.value = 0.5;
-    const presence = context.createBiquadFilter();
-    presence.type = 'peaking';
-    presence.frequency.value = role === 'lead' ? 2200 : 1550;
-    presence.Q.value = role === 'lead' ? 0.78 : 0.66;
-    presence.gain.value = role === 'lead' ? 1.7 : -0.6;
-    const envelope = context.createGain();
-    const panner = context.createStereoPanner();
-    const spatialAnchor = role === 'lead' ? 0.2 : -0.24;
-    const spatialDrift = Math.sin((index / Math.max(1, count)) * Math.PI * 2) * 0.11;
-    panner.pan.value = (spatialAnchor + spatialDrift) * profile.spread;
     const body = Math.max(
       0.095,
       rhythmicDuration * gesture.articulation + gesture.connection.overlapSeconds,
@@ -1840,11 +2293,83 @@ export class NagiAudioEngine {
       availableDuration,
       (body + release) * (0.9 + profile.space * 0.18),
     );
+    const sourceStart = Math.max(context.currentTime + 0.001, performanceStart - 0.008);
+    const sourceEnd = performanceStart + duration + 0.025;
+    const toneLayers = this.getToneLayers(role, midi, sourceStart, sourceEnd);
+    if (toneLayers.length === 0) return false;
+    if (role === 'lead') {
+      this.leadContinuousGestureSeconds = gesture.boundary.continuousSecondsAfter;
+    } else {
+      this.counterContinuousGestureSeconds = gesture.boundary.continuousSecondsAfter;
+    }
+    const toneMixer = context.createGain();
+    const frequency = midiToFrequency(midi);
+    const oscillators = toneLayers.map((layer) => {
+      const oscillator = context.createOscillator();
+      const layerGain = context.createGain();
+      oscillator.setPeriodicWave(layer.wave);
+      if (gesture.connection.kind === 'portamento' && gesture.connection.glideSeconds > 0) {
+        oscillator.frequency.setValueAtTime(midiToFrequency(previousMidi), performanceStart);
+        oscillator.frequency.exponentialRampToValueAtTime(
+          frequency,
+          performanceStart + gesture.connection.glideSeconds,
+        );
+      } else {
+        oscillator.frequency.setValueAtTime(frequency, performanceStart);
+      }
+      layerGain.gain.value = layer.level;
+      oscillator.connect(layerGain);
+      layerGain.connect(toneMixer);
+      return { layer, layerGain, oscillator };
+    });
+    const filter = context.createBiquadFilter();
+    filter.type = 'lowpass';
+    const motifCutoff =
+      ((role === 'lead' ? 1420 : 1050) +
+        profile.brightness * (role === 'lead' ? 2300 : 1700)) *
+      (0.72 + recipe.brightness * 0.58);
+    const filterFallOffset = Math.max(
+      0.09,
+      Math.min(duration, maximumDuration, rhythmicDuration + recipe.release),
+    );
+    const filterRiseOffset = Math.min(
+      Math.max(0.04, rhythmicDuration * 0.48),
+      filterFallOffset - 0.01,
+    );
+    filter.frequency.setValueAtTime(motifCutoff * 0.92, performanceStart);
+    filter.frequency.exponentialRampToValueAtTime(
+      motifCutoff * (1.02 + gesture.dynamic * 0.06),
+      performanceStart + filterRiseOffset,
+    );
+    filter.frequency.exponentialRampToValueAtTime(
+      motifCutoff * 0.86,
+      performanceStart + filterFallOffset,
+    );
+    filter.Q.value = role === 'lead' ? 0.34 : 0.28;
+    const highpass = context.createBiquadFilter();
+    highpass.type = 'highpass';
+    highpass.frequency.value = role === 'lead' ? 260 : 190;
+    highpass.Q.value = 0.5;
+    const presence = context.createBiquadFilter();
+    presence.type = 'peaking';
+    presence.frequency.value = role === 'lead' ? 2200 : 1550;
+    presence.Q.value = role === 'lead' ? 0.78 : 0.66;
+    presence.gain.value = role === 'lead' ? 1.7 : -0.6;
+    const envelope = context.createGain();
+    const panner = context.createStereoPanner();
+    const spatialAnchor = role === 'lead' ? 0.2 : -0.24;
+    const spatialDrift = Math.sin((index / Math.max(1, count)) * Math.PI * 2) * 0.11;
+    panner.pan.value = (spatialAnchor + spatialDrift) * profile.spread;
     const peakBase = role === 'lead'
       ? this.textureRandom.between(0.021, 0.032)
       : this.textureRandom.between(0.006, 0.011);
     const dynamic = gesture.dynamic;
-    const peak = peakBase * accent * (0.84 + profile.sparkle * 0.22) * dynamic;
+    const peak =
+      peakBase *
+      accent *
+      (0.84 + profile.sparkle * 0.22) *
+      dynamic *
+      this.textureRoleGain(role);
     const attack = Math.min(
       body * 0.45,
       recipe.attack * gesture.attackScale,
@@ -1875,24 +2400,42 @@ export class NagiAudioEngine {
       performanceStart + duration - 0.006,
     );
     envelope.gain.linearRampToValueAtTime(0, performanceStart + duration);
-    this.scheduleVibrato(
-      oscillator.detune,
-      performanceStart,
-      duration,
-      recipe,
-      expressionState,
-      this.textureRandom.between(-2.1, 2.1),
-      gesture.vibrato,
-    );
-    oscillator.connect(highpass);
+    const baseDetune = this.textureRandom.between(-2.1, 2.1);
+    oscillators.forEach(({ layer, oscillator }) => {
+      this.scheduleVibrato(
+        oscillator.detune,
+        performanceStart,
+        duration,
+        layer.recipe,
+        expressionState,
+        baseDetune,
+        gesture.vibrato,
+      );
+    });
+    toneMixer.connect(highpass);
     highpass.connect(filter);
     filter.connect(presence);
     presence.connect(envelope);
     envelope.connect(panner);
     panner.connect(role === 'lead' ? this.melodyBus : this.effectsBus);
-    oscillator.start(Math.max(context.currentTime + 0.001, performanceStart - 0.008));
-    oscillator.stop(performanceStart + duration + 0.025);
-    this.trackSource(oscillator, [highpass, filter, presence, envelope, panner]);
+    oscillators.forEach(({ oscillator }) => {
+      oscillator.start(sourceStart);
+      oscillator.stop(sourceEnd);
+    });
+    this.trackSourceGroup(
+      oscillators.map(({ oscillator }) => oscillator),
+      [
+        toneMixer,
+        ...oscillators.map(({ layerGain }) => layerGain),
+        highpass,
+        filter,
+        presence,
+        envelope,
+        panner,
+      ],
+      sourceStart,
+      sourceEnd,
+    );
     this.scheduleTimbreNoise(
       performanceStart,
       duration,
@@ -1904,6 +2447,7 @@ export class NagiAudioEngine {
       profile,
     );
     this.scheduledEvents += 1;
+    return true;
   }
 
   private scheduleTimbreNoise(
@@ -1921,14 +2465,27 @@ export class NagiAudioEngine {
       !this.noiseBuffer ||
       !this.harmonyBus ||
       !this.effectsBus ||
-      !this.melodyBus ||
-      this.trackedSources.size >= 40
+      !this.melodyBus
     ) return;
     const breath = recipe.breath ?? 0;
     const transient = recipe.transient ?? 0;
     if (breath + transient < 0.035) return;
 
     const context = this.context;
+    const transientDuration = Math.min(0.12, Math.max(0.035, duration * 0.12));
+    const bodyDuration = Math.max(
+      transientDuration + 0.02,
+      Math.min(duration, transient > breath ? 0.28 + breath * duration : duration),
+    );
+    const end = start + bodyDuration;
+    const sourceStart = Math.max(context.currentTime + 0.001, start - 0.004);
+    const sourceEnd = end + 0.015;
+    if (!this.canScheduleSourceWindow(
+      sourceStart,
+      sourceEnd,
+      1,
+      NOISE_SOURCE_OVERLAP_LIMIT,
+    )) return;
     const source = context.createBufferSource();
     source.buffer = this.noiseBuffer;
     source.loop = true;
@@ -1945,12 +2502,6 @@ export class NagiAudioEngine {
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
     panner.pan.value = pan;
-    const transientDuration = Math.min(0.12, Math.max(0.035, duration * 0.12));
-    const bodyDuration = Math.max(
-      transientDuration + 0.02,
-      Math.min(duration, transient > breath ? 0.28 + breath * duration : duration),
-    );
-    const end = start + bodyDuration;
     const peak = tonalPeak * (breath * 0.16 + transient * 0.3);
     const sustain = peak * clamp(breath / Math.max(0.08, breath + transient), 0.08, 0.72);
     envelope.gain.setValueAtTime(0, Math.max(0, start - 0.006));
@@ -1976,11 +2527,11 @@ export class NagiAudioEngine {
           : this.harmonyBus,
     );
     source.start(
-      Math.max(context.currentTime + 0.001, start - 0.004),
+      sourceStart,
       this.textureRandom.between(0, Math.max(0.01, this.noiseBuffer.duration - 0.4)),
     );
-    source.stop(end + 0.015);
-    this.trackSource(source, [filter, envelope, panner]);
+    source.stop(sourceEnd);
+    this.trackSource(source, [filter, envelope, panner], sourceStart, sourceEnd);
     this.scheduledEvents += 1;
   }
 
@@ -1990,6 +2541,10 @@ export class NagiAudioEngine {
     const voicing = this.currentVoicing.length > 0 ? this.currentVoicing : [60, 64, 67, 72];
     const index = Math.min(voicing.length - 1, Math.floor(this.interactionX * voicing.length));
     const midi = voicing[index] + (this.interactionY < 0.42 ? 12 : 0);
+    const duration = 0.85 + energy * 1.45;
+    const sourceStart = Math.max(context.currentTime + 0.001, start - 0.008);
+    const sourceEnd = start + duration + 0.025;
+    if (!this.canScheduleSourceWindow(sourceStart, sourceEnd)) return;
     const oscillator = context.createOscillator();
     const wave = this.getWave('counter', midi);
     if (!wave) return;
@@ -2004,7 +2559,6 @@ export class NagiAudioEngine {
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
     panner.pan.value = (this.interactionX - 0.5) * 1.6;
-    const duration = 0.85 + energy * 1.45;
     const peak = 0.003 + energy * 0.008;
     envelope.gain.setValueAtTime(0, Math.max(0, start - 0.008));
     envelope.gain.setValueAtTime(0, start);
@@ -2015,15 +2569,24 @@ export class NagiAudioEngine {
     filter.connect(envelope);
     envelope.connect(panner);
     panner.connect(this.effectsBus);
-    oscillator.start(Math.max(context.currentTime + 0.001, start - 0.008));
-    oscillator.stop(start + duration + 0.025);
-    this.trackSource(oscillator, [filter, envelope, panner]);
+    oscillator.start(sourceStart);
+    oscillator.stop(sourceEnd);
+    this.trackSource(oscillator, [filter, envelope, panner], sourceStart, sourceEnd);
     this.scheduledEvents += 1;
   }
 
   private scheduleAtmosphere(start: number, profile: WeatherProfile) {
     if (!this.context || !this.effectsBus || !this.noiseBuffer) return;
     const context = this.context;
+    const duration = this.atmosphereRandom.between(2.8, 6.2);
+    const sourceStart = Math.max(context.currentTime + 0.001, start - 0.008);
+    const sourceEnd = start + duration + 0.025;
+    if (!this.canScheduleSourceWindow(
+      sourceStart,
+      sourceEnd,
+      1,
+      NOISE_SOURCE_OVERLAP_LIMIT,
+    )) return;
     const source = context.createBufferSource();
     source.buffer = this.noiseBuffer;
     source.playbackRate.value = this.atmosphereRandom.between(0.55, 1.08);
@@ -2036,7 +2599,6 @@ export class NagiAudioEngine {
     const envelope = context.createGain();
     const panner = context.createStereoPanner();
     panner.pan.value = this.atmosphereRandom.between(-profile.spread, profile.spread);
-    const duration = this.atmosphereRandom.between(2.8, 6.2);
     const peak =
       this.atmosphereRandom.between(0.0007, 0.0019) *
       (0.76 + profile.sparkle * 0.3);
@@ -2050,22 +2612,43 @@ export class NagiAudioEngine {
     envelope.connect(panner);
     panner.connect(this.effectsBus);
     source.start(
-      Math.max(context.currentTime + 0.001, start - 0.008),
+      sourceStart,
       this.atmosphereRandom.between(0, 0.35),
       duration + 0.016,
     );
-    source.stop(start + duration + 0.025);
-    this.trackSource(source, [filter, envelope, panner]);
+    source.stop(sourceEnd);
+    this.trackSource(source, [filter, envelope, panner], sourceStart, sourceEnd);
     this.scheduledEvents += 1;
   }
 
-  private trackSource(source: AudioScheduledSourceNode, nodes: AudioNode[]) {
-    this.trackedSources.add(source);
-    source.onended = () => {
-      source.disconnect();
-      nodes.forEach((node) => node.disconnect());
-      this.trackedSources.delete(source);
-    };
+  private trackSource(
+    source: AudioScheduledSourceNode,
+    nodes: AudioNode[],
+    start: number,
+    end: number,
+  ) {
+    this.trackSourceGroup([source], nodes, start, end);
+  }
+
+  private trackSourceGroup(
+    sources: AudioScheduledSourceNode[],
+    nodes: AudioNode[],
+    start: number,
+    end: number,
+  ) {
+    const window = this.normalizeSourceWindow(start, end);
+    let remaining = sources.length;
+    sources.forEach((source) => {
+      this.trackedSources.add(source);
+      this.plannedSourceWindows.set(source, window);
+      source.onended = () => {
+        source.disconnect();
+        this.trackedSources.delete(source);
+        this.plannedSourceWindows.delete(source);
+        remaining -= 1;
+        if (remaining <= 0) nodes.forEach((node) => node.disconnect());
+      };
+    });
   }
 
   private createNoise(context: AudioContext, seconds: number) {

@@ -12,10 +12,10 @@ browser check.
 | --- | --- | --- |
 | Seed lifecycle | `lib/nagi/generative.ts`, `app/page.tsx` | Cryptographic user seeds, deterministic successor seeds, queued manual changes |
 | Weather | `lib/nagi/generative.ts` | Brightness, density, depth, flow, hue, motion, shape, space, sparkle, spread, warmth |
-| Macro form | `lib/nagi/generative.ts` | Statement, development, intensification, release, return; twelve emotional identities |
-| Harmony | `lib/nagi/generative.ts` | Twelve modes, tonal centres, functional progressions, chord colour, pivots, voice leading |
-| Rhythm and motif | `lib/nagi/composition.ts`, `lib/nagi/classical-prior.ts` | Meter-aware Euclidean grids, corpus-informed contours and rhythms, motif evolution |
-| Orchestration | `lib/nagi/performance.ts` | Five roles, seventeen instruments, formal-stage-aware hand-offs and expression |
+| Macro form | `lib/nagi/generative.ts` | Statement, development, intensification, release, true opening recall; twelve emotional identities |
+| Harmony | `lib/nagi/generative.ts` | Twelve mode-specific grammars, tonal centres, A/A′/B/A″ phrase memory, pivots, voice leading |
+| Rhythm and motif | `lib/nagi/composition.ts`, `lib/nagi/phrase-melody.ts`, `lib/nagi/classical-prior.ts` | Whole-phrase melodic skeletons, climax/cadence plans, corpus-informed motifs, realized counterpoint |
+| Orchestration | `lib/nagi/performance.ts`, `lib/nagi/texture-planning.ts` | Five roles, seventeen instruments, sparse-to-full texture plans, meter-aware accompaniment and hand-offs |
 | Synthesis and mix | `lib/nagi/audio-engine.ts` | Additive waves, filtered noise/transients, envelopes, vibrato, delay, convolution, dynamics |
 | Interaction | `app/page.tsx`, `lib/nagi/audio-engine.ts` | Pointer energy, spatial movement, short quantized tonal ripples, playback and volume |
 | Visual generation | `app/nagi-scene.tsx`, `lib/nagi/visual-presets.ts` | 36 emotion-specific shader templates, palettes, weather, core geometry, particles and post FX |
@@ -58,6 +58,19 @@ authentic, plagal, half, deceptive or modal closure from the current formal
 stage. Cadence degrees are adapted to the active mode and unstable triads are
 substituted before they can occupy a structural cadence position.
 
+Every mode now owns a separate harmonic grammar: functional-degree labels,
+root preferences, identity-bearing characteristic tones, and a dedicated modal
+cadence. Coverage of twelve scales therefore produces twelve harmonic dialects
+rather than one major/minor grammar transposed onto different pitch sets.
+
+Phrases participate in an explicit A, A′, B, A″ memory cycle. A′ preserves the
+recognisable harmonic skeleton with limited functional substitutions, B creates
+contrast, and A″ recalls the opening while recomposing its middle and cadence.
+The return stage also draws the scene itself back toward the opening tonic,
+mode, meter and emotional state. Automatic seed changes wait until one complete
+formal cycle has finished, and scene duration is measured in bars rather than
+chord-event count.
+
 The bass is planned over the same phrase rather than being forced to every chord
 root. A bounded dynamic-programming pass balances pedal tones, stepwise motion,
 inversions and cadence-safe root arrivals. The chosen bass pitch is then a hard
@@ -87,8 +100,8 @@ rhythm, metric stability, cadence motion and bass affinity. Runtime metric
 conditioning now receives the generated note's real onset and meter instead of
 inferring a false beat class from its index. Corpus motif n-grams and cadence
 intervals, which were previously trained but unused, now shape phrase identity
-and final motion. Familiar public-domain theme DNA is selected about eighteen
-percent of the time so that named quotations remain rare colour.
+and final motion. Familiar public-domain theme DNA is selected about eight
+percent of the time so that named quotations remain a true easter egg.
 When selected it is rotated, re-based, and frequently inverted or retrograded;
 rhythm is also rotated and scaled. Mutation remains periodic rather than
 per-note, so identity survives many cycles while the music avoids literal,
@@ -100,6 +113,15 @@ resolution pressure and roughness constraints. Non-chord tones may cross an
 ordinary harmony change, with strong resolution pressure reserved for the true
 phrase cadence.
 
+Melody is now planned once for the complete phrase and sliced into each harmony
+window only at scheduling time. The plan fixes a register arc, one explicit
+climax, cadence approach and arrival, phrase-rhetorical roles, and a sustained
+counterpoint entry/exit window. Appoggiaturas and suspensions are deliberate
+accented dissonances with a required following resolution. After concrete MIDI
+pitches are chosen, counterpoint is reconciled against actual overlapping note
+durations to correct voice crossing, accented vertical dissonance and parallel
+perfect motion.
+
 ### Orchestration and digital synthesis
 
 A scene change could previously redraw the entire ensemble. Formal boundaries
@@ -107,6 +129,19 @@ now behave like orchestral hand-offs: one role normally changes, and at most
 two change in development or intensification. Instrument continuity is part of
 the sampling weight and lead/counter collision correction stays inside that
 budget.
+
+Instrument identity and instrument presence are separate decisions. Each
+phrase receives a texture plan spanning sparse, duo, chamber, full and release
+states. It controls active roles, spotlight, sustained chord-voice count, and
+minimum-duration entrances and exits. Counterpoint and accompaniment are
+phrase-level roles instead of per-chord coin flips. Harmony may genuinely drop
+to zero for an exposed solo, while intensification can reach a bounded five- or
+six-voice chord without making that density the default.
+
+Accompaniment uses retained or deliberately varied meter-specific sustain,
+pulse, arpeggio, syncopated and sparse patterns. Every onset remains quantized
+to the shared transport subdivision; rhythmic variety does not reintroduce an
+independent clock.
 
 Performance is resolved per note and per concrete instrument. All seventeen
 recipes declare a physical gesture family, playable legato behavior, breath or
@@ -125,6 +160,13 @@ now include a breath or transient component. Filtered noise supplies flute,
 reed, string and choir air; short noise transients add the excitation missing
 from celesta, harp, felt piano, pizzicato and marimba. These layers remain under
 the same source cap and envelope safety rules as tonal sources.
+
+Instrument hand-offs no longer interpolate two harmonic tables into an
+unidentifiable middle instrument. During a bounded transition, the outgoing and
+incoming instruments sound as separate equal-power layers. The scheduler falls
+back to the dominant layer near the source cap. Note filters now move through
+the gesture envelope so timbre evolves within a note instead of remaining a
+static periodic wave behind a gain envelope.
 
 Convolution reverb now uses equal-power-inspired dry/wet gains instead of two
 independently linear levels. Master smoothing, rumble removal, presence control,
@@ -188,8 +230,9 @@ covers, among other checks:
 
 - 24 hours of transport with no cumulative grid drift and at most 40 sources;
 - all twelve keys, at least eight modes, all meters and all formal stages;
-- phrase-boundary integrity, gradual tempo, common-tone modal transitions and
-  pivot continuity, plus all five planned cadence types and exact arrivals;
+- phrase-boundary integrity, gradual tempo, common-tone modal transitions,
+  twelve mode grammars, all five cadence types, exact arrivals, and bounded
+  A/A′/B/A″ similarity bands;
 - motif identity, real-onset corpus conditioning, melodic singability,
   contrary/oblique counterpoint, cadence and resolution quality, roughness and
   parallel-motion limits;
@@ -200,8 +243,9 @@ covers, among other checks:
   unavailable, and recovery bounded by the platform ceiling;
 - 512 complete multi-seed emotional journeys with bright/high-tempo coverage;
 - all seventeen instruments, idiomatic connection/decay/breath/vibrato plans,
-  no more than two changed roles per formal hand-off, expression interpolation,
-  and fourteen noise/transient recipes;
+  sparse/duo/chamber/full/release coverage, phrase-persistent entrances, five
+  accompaniment families, equal-power hand-offs, and fourteen noise/transient
+  recipes;
 - stable shader cells, complete palette/template coverage, zero-gain onset and
   release scheduling, and smooth transition endpoints.
 
