@@ -7,10 +7,18 @@ import {
   ChromaticAberration,
   EffectComposer,
   Noise,
+  SMAA,
   Vignette,
 } from '@react-three/postprocessing';
-import { BlendFunction } from 'postprocessing';
-import { type RefObject, useEffect, useMemo, useRef, useState } from 'react';
+import { BlendFunction, SMAAPreset } from 'postprocessing';
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import * as THREE from 'three';
 import {
   type AudioBands,
@@ -27,6 +35,16 @@ import {
   EMOTION_COLOR_PALETTES,
   EMOTION_SHADER_TEMPLATES,
 } from '../lib/nagi/visual-presets';
+import {
+  chooseRenderQualityCeiling,
+  readRenderDeviceProfile,
+  renderTierIndex,
+  resolveRenderQualityPlan,
+  stepRenderQualityTier,
+  type RenderGpuProfile,
+  type RenderQualityPlan,
+  type RenderQualityTier,
+} from '../lib/nagi/render-quality';
 
 export type NagiPointerField = {
   down: number;
@@ -47,11 +65,16 @@ export type NagiRendererDiagnostics = {
   contextLosses: number;
   drawCalls: number;
   fps: number;
+  frameBuffer: RenderQualityPlan['frameBuffer'];
   frames: number;
   maxFrameGapMs: number;
+  multisampling: number;
   pointerEnergy: number;
+  postAntialias: 'msaa' | 'smaa';
   pulse: number;
   quality: number;
+  qualityCeiling: RenderQualityTier;
+  qualityTier: RenderQualityTier;
   styleName: string;
   styleVariant: number;
   webgl: boolean;
@@ -67,6 +90,7 @@ type NagiSceneProps = {
 
 type InnerSceneProps = NagiSceneProps & {
   audioRef: RefObject<AudioBands>;
+  renderQuality: RenderQualityPlan;
 };
 
 const BACKDROP_VERTEX_SHADER = `
@@ -410,7 +434,12 @@ function shaderState(emotion: EmotionName, seed: string) {
   };
 }
 
-function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
+function EmotionBackdrop({
+  audioRef,
+  pointerRef,
+  renderQuality,
+  seedSnapshot,
+}: InnerSceneProps) {
   const materialRef = useRef<THREE.ShaderMaterial>(null);
   const seedValue = seedToNumber(seedSnapshot.currentSeed) / 4294967295;
   const colorTarget = useMemo(() => palette(), []);
@@ -526,7 +555,9 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
 
   return (
     <mesh renderOrder={-10} scale={1}>
-      <sphereGeometry args={[12, 64, 64]} />
+      <sphereGeometry
+        args={[12, renderQuality.backdropSegments, renderQuality.backdropSegments]}
+      />
       <shaderMaterial
         ref={materialRef}
         uniforms={uniforms}
@@ -540,7 +571,12 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
   );
 }
 
-function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
+function DreamCore({
+  audioRef,
+  pointerRef,
+  renderQuality,
+  seedSnapshot,
+}: InnerSceneProps) {
   const coreRef = useRef<THREE.Mesh>(null);
   const shellRef = useRef<THREE.Mesh>(null);
   const coreMaterialRef = useRef<THREE.ShaderMaterial>(null);
@@ -648,7 +684,9 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
   return (
     <group>
       <mesh ref={coreRef}>
-        <sphereGeometry args={[0.9, 128, 128]} />
+        <sphereGeometry
+          args={[0.9, renderQuality.coreSegments, renderQuality.coreSegments]}
+        />
         <shaderMaterial
           ref={coreMaterialRef}
           uniforms={coreUniforms}
@@ -657,7 +695,9 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
         />
       </mesh>
       <mesh ref={shellRef}>
-        <sphereGeometry args={[0.9, 96, 96]} />
+        <sphereGeometry
+          args={[0.9, renderQuality.shellSegments, renderQuality.shellSegments]}
+        />
         <shaderMaterial
           ref={shellMaterialRef}
           uniforms={shellUniforms}
@@ -673,7 +713,12 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
   );
 }
 
-function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
+function OrbitalDetails({
+  audioRef,
+  pointerRef,
+  renderQuality,
+  seedSnapshot,
+}: InnerSceneProps) {
   const groupRef = useRef<THREE.Group>(null);
   const knotRef = useRef<THREE.Mesh>(null);
   const satellitesRef = useRef<THREE.Group>(null);
@@ -728,7 +773,14 @@ function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps)
     <group ref={groupRef} rotation={[0.8, 0.1, 0.25]}>
       {[0, 1].map((index) => (
         <mesh key={index} rotation={[Math.PI / 2 + index * 0.48, index * 0.72, index * 0.35]}>
-          <torusGeometry args={[1.15 + index * 0.16, 0.0035 + index * 0.001, 8, 180]} />
+          <torusGeometry
+            args={[
+              1.15 + index * 0.16,
+              0.0035 + index * 0.001,
+              8,
+              renderQuality.orbitalSegments,
+            ]}
+          />
           <meshBasicMaterial
             color={color}
             transparent
@@ -739,7 +791,9 @@ function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps)
         </mesh>
       ))}
       <mesh ref={knotRef}>
-        <torusKnotGeometry args={[1.24, 0.0035, 240, 8, 2, 3]} />
+        <torusKnotGeometry
+          args={[1.24, 0.0035, renderQuality.knotSegments, 8, 2, 3]}
+        />
         <meshBasicMaterial
           color={color}
           transparent
@@ -774,6 +828,7 @@ function SceneController({
   diagnosticsRef,
   engineRef,
   pointerRef,
+  renderQuality,
   rendererRef,
   seedSnapshot,
 }: InnerSceneProps) {
@@ -800,6 +855,10 @@ function SceneController({
       rendererRef.current.antialias = gl.getContextAttributes()?.antialias ?? false;
     }
     rendererRef.current.quality = gl.getPixelRatio();
+    rendererRef.current.frameBuffer = renderQuality.frameBuffer;
+    rendererRef.current.multisampling = renderQuality.multisampling;
+    rendererRef.current.postAntialias = renderQuality.smaa ? 'smaa' : 'msaa';
+    rendererRef.current.qualityTier = renderQuality.tier;
     rendererRef.current.maxFrameGapMs = Math.max(
       rendererRef.current.maxFrameGapMs,
       Math.min(1000, delta * 1000),
@@ -875,6 +934,7 @@ function SceneController({
         diagnosticsRef={diagnosticsRef}
         engineRef={engineRef}
         pointerRef={pointerRef}
+        renderQuality={renderQuality}
         rendererRef={rendererRef}
         seedSnapshot={seedSnapshot}
       />
@@ -886,6 +946,7 @@ function SceneController({
         diagnosticsRef={diagnosticsRef}
         engineRef={engineRef}
         pointerRef={pointerRef}
+        renderQuality={renderQuality}
         rendererRef={rendererRef}
         seedSnapshot={seedSnapshot}
       />
@@ -894,11 +955,14 @@ function SceneController({
         diagnosticsRef={diagnosticsRef}
         engineRef={engineRef}
         pointerRef={pointerRef}
+        renderQuality={renderQuality}
         rendererRef={rendererRef}
         seedSnapshot={seedSnapshot}
       />
       <Sparkles
-        count={90 + Math.round(seedSnapshot.profile.density * 90)}
+        count={Math.round(
+          (90 + seedSnapshot.profile.density * 90) * renderQuality.detailScale,
+        )}
         scale={[5.8, 4, 4.2]}
         size={0.55 + seedSnapshot.profile.sparkle * 0.65}
         speed={0.055 + seedSnapshot.profile.motion * 0.08}
@@ -920,29 +984,129 @@ function SceneController({
   );
 }
 
-function PostEffects({ seedSnapshot }: { seedSnapshot: SeedSnapshot }) {
+function PostEffects({
+  renderQuality,
+  seedSnapshot,
+}: {
+  renderQuality: RenderQualityPlan;
+  seedSnapshot: SeedSnapshot;
+}) {
   const chromaticOffset = useMemo(() => new THREE.Vector2(0.00028, 0.00042), []);
+  const frameBufferType =
+    renderQuality.frameBuffer === 'half-float'
+      ? THREE.HalfFloatType
+      : THREE.UnsignedByteType;
   return (
-    <EffectComposer multisampling={0} frameBufferType={THREE.UnsignedByteType}>
+    <EffectComposer
+      multisampling={renderQuality.multisampling}
+      frameBufferType={frameBufferType}
+    >
       <Bloom
         intensity={0.32 + seedSnapshot.profile.sparkle * 0.2}
         luminanceThreshold={0.52}
         luminanceSmoothing={0.68}
-        mipmapBlur
+        mipmapBlur={renderQuality.mipmapBloom}
       />
-      <ChromaticAberration
-        blendFunction={BlendFunction.NORMAL}
-        offset={chromaticOffset}
-        radialModulation={false}
-        modulationOffset={0.35}
-      />
+      {renderQuality.chromaticAberration && (
+        <ChromaticAberration
+          blendFunction={BlendFunction.NORMAL}
+          offset={chromaticOffset}
+          radialModulation={false}
+          modulationOffset={0.35}
+        />
+      )}
+      {renderQuality.smaa && (
+        <SMAA
+          preset={
+            renderQuality.smaaPreset === 'high'
+              ? SMAAPreset.HIGH
+              : SMAAPreset.MEDIUM
+          }
+        />
+      )}
       <Noise blendFunction={BlendFunction.SOFT_LIGHT} opacity={0.016} />
       <Vignette eskil={false} offset={0.18} darkness={0.64} />
     </EffectComposer>
   );
 }
 
+function AdaptiveRenderQuality({
+  ceiling,
+  onTierChange,
+  tier,
+}: {
+  ceiling: RenderQualityTier;
+  onTierChange: (tier: RenderQualityTier) => void;
+  tier: RenderQualityTier;
+}) {
+  const monitorRef = useRef({
+    cooldownUntil: 0,
+    emaFrameMs: 16.67,
+    fastSeconds: 0,
+    slowSeconds: 0,
+    startedAt: 0,
+  });
+
+  useEffect(() => {
+    const now = performance.now();
+    monitorRef.current = {
+      cooldownUntil: now + 8_000,
+      emaFrameMs: 16.67,
+      fastSeconds: 0,
+      slowSeconds: 0,
+      startedAt: now,
+    };
+  }, [tier]);
+
+  useFrame((_, delta) => {
+    const monitor = monitorRef.current;
+    const now = performance.now();
+    if (monitor.startedAt === 0) {
+      monitor.startedAt = now;
+      monitor.cooldownUntil = now + 5_000;
+    }
+    if (document.hidden || delta <= 0 || delta > 0.12) {
+      monitor.fastSeconds = 0;
+      monitor.slowSeconds = 0;
+      return;
+    }
+
+    const frameMs = delta * 1_000;
+    const smoothing = 1 - Math.exp(-delta * 2.4);
+    monitor.emaFrameMs += (frameMs - monitor.emaFrameMs) * smoothing;
+    if (now < monitor.cooldownUntil) return;
+
+    if (monitor.emaFrameMs > 22.2) {
+      monitor.slowSeconds += delta;
+      monitor.fastSeconds = Math.max(0, monitor.fastSeconds - delta * 2);
+    } else if (monitor.emaFrameMs < 17.8) {
+      monitor.fastSeconds += delta;
+      monitor.slowSeconds = Math.max(0, monitor.slowSeconds - delta * 2);
+    } else {
+      monitor.fastSeconds = Math.max(0, monitor.fastSeconds - delta);
+      monitor.slowSeconds = Math.max(0, monitor.slowSeconds - delta);
+    }
+
+    if (monitor.slowSeconds >= 4) {
+      const nextTier = stepRenderQualityTier(tier, ceiling, 'down');
+      monitor.slowSeconds = 0;
+      monitor.fastSeconds = 0;
+      monitor.cooldownUntil = now + 10_000;
+      if (nextTier !== tier) onTierChange(nextTier);
+    } else if (monitor.fastSeconds >= 18) {
+      const nextTier = stepRenderQualityTier(tier, ceiling, 'up');
+      monitor.slowSeconds = 0;
+      monitor.fastSeconds = 0;
+      monitor.cooldownUntil = now + 12_000;
+      if (nextTier !== tier) onTierChange(nextTier);
+    }
+  });
+
+  return null;
+}
+
 export function NagiScene(props: NagiSceneProps) {
+  const { rendererRef } = props;
   const audioRef = useRef<AudioBands>({
     arousal: 0.16,
     barPhase: 0,
@@ -956,31 +1120,70 @@ export function NagiScene(props: NagiSceneProps) {
     tension: 0,
     valence: 0.5,
   });
-  const qualityForViewport = () =>
-    Math.min(window.devicePixelRatio || 1, window.innerWidth < 720 ? 1 : 1.35);
-  const [quality, setQuality] = useState(qualityForViewport);
+  const [gpuProfile, setGpuProfile] = useState<RenderGpuProfile>({
+    halfFloatColorBuffer: false,
+    maxSamples: 4,
+  });
+  const [qualityState, setQualityState] = useState(() => {
+    const device = readRenderDeviceProfile();
+    const ceiling = chooseRenderQualityCeiling(device);
+    return {
+      ceiling,
+      devicePixelRatio: device.devicePixelRatio,
+      tier: ceiling,
+    };
+  });
+  const renderQuality = useMemo(
+    () =>
+      resolveRenderQualityPlan(
+        qualityState.tier,
+        qualityState.devicePixelRatio,
+        gpuProfile,
+      ),
+    [gpuProfile, qualityState.devicePixelRatio, qualityState.tier],
+  );
+  const handleTierChange = useCallback((tier: RenderQualityTier) => {
+    setQualityState((current) =>
+      current.tier === tier ? current : { ...current, tier },
+    );
+  }, []);
 
   useEffect(() => {
     let frame = 0;
-    const updateQuality = () => {
+    const updatePlatformProfile = () => {
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => setQuality(qualityForViewport()));
+      frame = requestAnimationFrame(() => {
+        const device = readRenderDeviceProfile();
+        const ceiling = chooseRenderQualityCeiling(device);
+        setQualityState((current) => ({
+          ceiling,
+          devicePixelRatio: device.devicePixelRatio,
+          tier:
+            renderTierIndex(current.tier) > renderTierIndex(ceiling)
+              ? ceiling
+              : current.tier,
+        }));
+      });
     };
-    window.addEventListener('resize', updateQuality, { passive: true });
+    window.addEventListener('resize', updatePlatformProfile, { passive: true });
     return () => {
       cancelAnimationFrame(frame);
-      window.removeEventListener('resize', updateQuality);
+      window.removeEventListener('resize', updatePlatformProfile);
     };
   }, []);
+
+  useEffect(() => {
+    rendererRef.current.qualityCeiling = qualityState.ceiling;
+  }, [rendererRef, qualityState.ceiling]);
 
   return (
     <Canvas
       className="nagi-r3f"
-      dpr={quality}
+      dpr={renderQuality.dpr}
       camera={{ fov: 38, near: 0.1, far: 30, position: [0, 0, 4.9] }}
       gl={{
         alpha: false,
-        antialias: true,
+        antialias: false,
         powerPreference: 'high-performance',
         preserveDrawingBuffer: false,
       }}
@@ -989,10 +1192,26 @@ export function NagiScene(props: NagiSceneProps) {
         gl.outputColorSpace = THREE.SRGBColorSpace;
         gl.toneMapping = THREE.ACESFilmicToneMapping;
         gl.toneMappingExposure = 0.82;
+        setGpuProfile({
+          halfFloatColorBuffer: gl.extensions.has('EXT_color_buffer_float'),
+          maxSamples: gl.capabilities.maxSamples,
+        });
       }}
     >
-      <SceneController {...props} audioRef={audioRef} />
-      <PostEffects seedSnapshot={props.seedSnapshot} />
+      <SceneController
+        {...props}
+        audioRef={audioRef}
+        renderQuality={renderQuality}
+      />
+      <PostEffects
+        renderQuality={renderQuality}
+        seedSnapshot={props.seedSnapshot}
+      />
+      <AdaptiveRenderQuality
+        ceiling={qualityState.ceiling}
+        onTierChange={handleTierChange}
+        tier={qualityState.tier}
+      />
     </Canvas>
   );
 }

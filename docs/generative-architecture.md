@@ -125,8 +125,23 @@ Hard high-power masks for stars, crystals, lattice and ribbons were replaced by
 band-limited smooth thresholds, reducing pixel shimmer. The CPU chooses one of
 three templates per emotion with an integer seed hash; shader noise is used for
 texture, not identity. Renderer diagnostics now report the real audio pulse.
-Device pixel ratio is recomputed after viewport changes, with a mobile cap, so
-responsive testing does not leave the renderer at a stale quality setting.
+Rendering quality is selected from economy, balanced, quality and ultra plans.
+The initial ceiling combines viewport pixel load, pointer class, logical cores
+and reported device memory; the live WebGL renderer then clamps MSAA to its
+actual sample limit and enables half-float post-processing only when the color
+buffer extension is present. Economy devices use SMAA with a 1x DPR cap, while
+faster devices progressively raise geometry detail and DPR and use 2x or 4x
+MSAA. This keeps every tier antialiased instead of treating antialiasing as an
+all-or-nothing performance switch. The default canvas framebuffer leaves its
+redundant MSAA disabled because all scene geometry is rendered through the
+composer's antialiased offscreen target.
+
+A runtime controller uses an exponentially smoothed frame time after a warm-up
+period. Four sustained seconds below roughly 45 FPS lower one tier; eighteen
+sustained seconds near 60 FPS recover one tier, never above the detected
+platform ceiling. Cooldowns and opposing counters prevent rapid quality
+oscillation. Viewport or display changes recompute the ceiling and DPR without
+discarding a performance-driven downgrade.
 
 ### Interaction and accessibility
 
@@ -148,6 +163,8 @@ covers, among other checks:
 - motif identity, melodic singability, counterpoint independence, cadence and
   resolution quality, roughness and parallel-motion limits;
 - deterministic independent random domains and all three visual variants;
+- deterministic platform quality plans, an SMAA fallback when MSAA is
+  unavailable, and recovery bounded by the platform ceiling;
 - all seventeen instruments, no more than two changed roles per formal hand-off,
   expression interpolation, and fourteen noise/transient recipes;
 - stable shader cells, complete palette/template coverage, zero-gain onset and

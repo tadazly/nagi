@@ -54,10 +54,44 @@ import {
   EMOTION_COLOR_PALETTES,
   EMOTION_SHADER_TEMPLATES,
 } from '../lib/nagi/visual-presets.ts';
+import {
+  chooseRenderQualityCeiling,
+  resolveRenderQualityPlan,
+  stepRenderQualityTier,
+} from '../lib/nagi/render-quality.ts';
 
 const HOURS = 24;
 const END_SECONDS = HOURS * 60 * 60;
 const START_SEED = '7F3A91C2';
+
+const lowMobileTier = chooseRenderQualityCeiling({
+  coarsePointer: true,
+  deviceMemoryGb: 2,
+  devicePixelRatio: 3,
+  hardwareConcurrency: 4,
+  height: 844,
+  width: 390,
+});
+const desktopTier = chooseRenderQualityCeiling({
+  coarsePointer: false,
+  deviceMemoryGb: 16,
+  devicePixelRatio: 2,
+  hardwareConcurrency: 12,
+  height: 900,
+  width: 1440,
+});
+const lowMobilePlan = resolveRenderQualityPlan(lowMobileTier, 3, {
+  halfFloatColorBuffer: false,
+  maxSamples: 4,
+});
+const desktopPlan = resolveRenderQualityPlan(desktopTier, 2, {
+  halfFloatColorBuffer: true,
+  maxSamples: 4,
+});
+const noMsaaPlan = resolveRenderQualityPlan('quality', 2, {
+  halfFloatColorBuffer: false,
+  maxSamples: 0,
+});
 
 let currentSeed = START_SEED;
 let currentProfile = profileFromSeed(currentSeed);
@@ -812,6 +846,21 @@ const assertions = {
   performanceUsesMultipleArticulations: articulationCoverage.size >= 12,
   rhythmSyncIsIsolatedToBackdrop:
     backdropOwnsRhythm && !foregroundUsesInstantRhythm,
+  renderQualityAdaptsToPlatform:
+    lowMobileTier === 'economy' &&
+    desktopTier === 'ultra' &&
+    lowMobilePlan.dpr < desktopPlan.dpr &&
+    lowMobilePlan.detailScale < desktopPlan.detailScale,
+  renderQualityAlwaysHasPostAntialiasing:
+    lowMobilePlan.smaa &&
+    lowMobilePlan.multisampling === 0 &&
+    !desktopPlan.smaa &&
+    desktopPlan.multisampling === 4 &&
+    noMsaaPlan.smaa,
+  renderQualityRecoveryRespectsPlatformCeiling:
+    stepRenderQualityTier('economy', 'balanced', 'up') === 'balanced' &&
+    stepRenderQualityTier('balanced', 'balanced', 'up') === 'balanced' &&
+    stepRenderQualityTier('balanced', 'ultra', 'down') === 'economy',
   noteOnsetsUseZeroGainPreroll:
     zeroGainAttackCount >= 6 &&
     zeroGainReleaseCount >= 6 &&
@@ -925,6 +974,11 @@ const report = {
   motifTargetRate: Number(motifTargetRate.toFixed(4)),
   parallelPerfectRate: Number(parallelPerfectRate.toFixed(5)),
   progressionWindowUniqueness: Number(progressionUniqueness.toFixed(4)),
+  renderQuality: {
+    desktop: desktopPlan,
+    lowMobile: lowMobilePlan,
+    noMsaaFallback: noMsaaPlan,
+  },
   resolutionRate: Number(resolutionRate.toFixed(4)),
   seedChanges,
   timbreNoiseRecipes,
