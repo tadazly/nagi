@@ -11,6 +11,8 @@
     "build:static": "node scripts/build-static.mjs",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "test:music": "npm run test:timbre && npm run test:soak",
+    "test:timbre": "node --experimental-strip-types scripts/timbre-audit.mjs",
     "test:soak": "node --experimental-strip-types scripts/soak-audit.mjs"
   },
   "dependencies": {

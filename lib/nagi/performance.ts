@@ -51,8 +51,8 @@ export type OrchestrationPlan = {
 };
 
 /**
- * Perceptual trims applied after PeriodicWave normalization. Bright, transient
- * instruments project more strongly than their normalized sample peak implies;
+ * Perceptual trims applied after PCM sample-model normalization. Bright,
+ * transient instruments project more strongly than their normalized peak implies;
  * ensemble and low instruments need less or more electrical level to occupy a
  * comparable orchestral plane.
  */

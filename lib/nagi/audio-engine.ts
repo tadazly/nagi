@@ -73,6 +73,11 @@ import {
   type VoiceExpression,
 } from './performance';
 import {
+  InstrumentSampleBank,
+  playbackRateForMidi,
+  type RenderedInstrumentSample,
+} from './instrument-rendering';
+import {
   accompanimentEventsForSpan,
   planPhraseTexture,
   textureSegmentAtBar,
@@ -128,6 +133,7 @@ export type NagiDiagnostics = {
   harmonicVoiceCount: number;
   soundingChordVoices: number;
   incomingSeed: string | null;
+  instrumentRenderer: string;
   interaction: number;
   leadMotifCycle: number;
   leadMotifMutations: number;
@@ -150,6 +156,12 @@ export type NagiDiagnostics = {
   percussionActive: boolean;
   percussionInstrument: string;
   scheduledEvents: number;
+  sampleCacheBytes: number;
+  sampleCacheEntries: number;
+  sampleCacheEvictions: number;
+  sampleCacheHits: number;
+  sampleCacheMisses: number;
+  sampleRenderMaximumMs: number;
   schedulerRecoveries: number;
   transition: number;
   treble: number;
@@ -192,7 +204,7 @@ type ToneLayer = {
   instrument: InstrumentId;
   level: number;
   recipe: TimbreRecipe;
-  wave: PeriodicWave;
+  sample: RenderedInstrumentSample;
 };
 
 type PlannedSourceWindow = {
@@ -354,7 +366,7 @@ export class NagiAudioEngine {
   private counterMotif: MotifDNA;
   private volume = DEFAULT_VOLUME;
   private wet?: GainNode;
-  private readonly waveCache = new Map<string, PeriodicWave>();
+  private sampleBank?: InstrumentSampleBank;
 
   constructor(seed: string, options: EngineOptions = {}) {
     this.currentSeed = seed;
@@ -404,7 +416,6 @@ export class NagiAudioEngine {
     this.performanceRandom = new SeededRandom(deriveSeedNumber(root, 'performance'));
     this.textureRandom = new SeededRandom(deriveSeedNumber(root, 'timbre-detail'));
     this.atmosphereRandom = new SeededRandom(deriveSeedNumber(root, 'atmosphere'));
-    this.waveCache.clear();
   }
 
   private phraseFormRole(stage: EmotionalFormPlan['stages'][number]): PhraseFormRole {
@@ -513,6 +524,7 @@ export class NagiAudioEngine {
     if (!AudioContextClass) throw new Error('Web Audio is not supported');
     const context = new AudioContextClass({ latencyHint: 'interactive' });
     this.context = context;
+    this.sampleBank = new InstrumentSampleBank(context);
     this.sourceBus = context.createGain();
     this.effectsBus = context.createGain();
     this.harmonyBus = context.createGain();
@@ -617,7 +629,9 @@ export class NagiAudioEngine {
     this.playing = true;
     this.master.gain.setValueAtTime(0, now);
     this.master.gain.linearRampToValueAtTime(this.volume, now + 0.38);
-    this.nextHarmonyAt = now + 0.025;
+    // Leave one short perceptual-onset window for cold PCM cache creation.
+    // Subsequent misses are scheduled inside the normal 3.2 s lookahead.
+    this.nextHarmonyAt = now + 0.09;
     this.scheduleHarmony(this.nextHarmonyAt, true);
     this.nextFxAt = now + 2.1;
     this.nextSeedAt = now + this.dwellSeconds(this.currentProfile);
@@ -819,6 +833,16 @@ export class NagiAudioEngine {
     const now = this.context?.currentTime ?? 0;
     const transport = this.getTransportState(now);
     const performance = this.getPerformancePlan();
+    const sampleBank = this.sampleBank?.diagnostics() ?? {
+      bytes: 0,
+      entries: 0,
+      evictions: 0,
+      hits: 0,
+      maximumRenderMs: 0,
+      misses: 0,
+      rendererVersion: 'uninitialized',
+      totalRenderMs: 0,
+    };
     return {
       accompanimentPulseEvents: this.accompanimentPulseEvents,
       accompanimentInstrument: this.getTimbre('accompaniment').label,
@@ -846,6 +870,7 @@ export class NagiAudioEngine {
       harmonicVoiceCount: this.harmonicVoiceCount,
       soundingChordVoices: this.soundingChordVoices,
       incomingSeed: snapshot.incomingSeed,
+      instrumentRenderer: sampleBank.rendererVersion,
       interaction: this.bands.interaction,
       leadMotifCycle: this.leadMotif.cycle,
       leadMotifMutations: this.leadMotif.mutations,
@@ -871,6 +896,12 @@ export class NagiAudioEngine {
       percussionActive: this.percussionActive,
       percussionInstrument: this.getTimbre('percussion').label,
       scheduledEvents: this.scheduledEvents,
+      sampleCacheBytes: sampleBank.bytes,
+      sampleCacheEntries: sampleBank.entries,
+      sampleCacheEvictions: sampleBank.evictions,
+      sampleCacheHits: sampleBank.hits,
+      sampleCacheMisses: sampleBank.misses,
+      sampleRenderMaximumMs: sampleBank.maximumRenderMs,
       schedulerRecoveries: this.schedulerRecoveries,
       transition: snapshot.transition,
       treble: this.bands.treble,
@@ -898,6 +929,8 @@ export class NagiAudioEngine {
     this.plannedSourceWindows.clear();
     this.transportTimeline = [];
     this.playing = false;
+    this.sampleBank?.clear();
+    this.sampleBank = undefined;
     const context = this.context;
     this.context = undefined;
     if (context && context.state !== 'closed') await context.close();
@@ -1127,39 +1160,6 @@ export class NagiAudioEngine {
       : this.orchestrationTarget[role];
   }
 
-  private getWaveForInstrument(instrument: InstrumentId, midi = 60) {
-    if (!this.context) return undefined;
-    const pitchBucket = Math.round(midi / 3) * 3;
-    const key = `${instrument}:${pitchBucket}`;
-    const cached = this.waveCache.get(key);
-    if (cached) return cached;
-    const recipe = INSTRUMENTS[instrument];
-    const real = new Float32Array(recipe.partials.length);
-    const imaginary = new Float32Array(recipe.partials.length);
-    const fundamental = midiToFrequency(pitchBucket);
-    const nyquist = this.context.sampleRate * 0.5;
-    for (let harmonic = 1; harmonic < recipe.partials.length; harmonic += 1) {
-      const harmonicHz = fundamental * harmonic;
-      const antiAlias = clamp((nyquist - harmonicHz) / (nyquist * 0.12));
-      const pitchTilt = Math.exp(-Math.max(0, pitchBucket - 60) * harmonic * 0.0028);
-      const amplitude = recipe.partials[harmonic] * antiAlias * pitchTilt;
-      const phase =
-        (deriveSeedNumber(0x51f2e9ad, `${instrument}:${harmonic}`) / 0x100000000) *
-        Math.PI *
-        2;
-      real[harmonic] = amplitude * Math.cos(phase);
-      imaginary[harmonic] = amplitude * Math.sin(phase);
-    }
-    const wave = this.context.createPeriodicWave(
-      real,
-      imaginary,
-      { disableNormalization: false },
-    );
-    if (this.waveCache.size >= 384) this.waveCache.clear();
-    this.waveCache.set(key, wave);
-    return wave;
-  }
-
   private normalizeSourceWindow(start: number, end: number): PlannedSourceWindow {
     const safeStart = Math.max(0, start);
     return {
@@ -1220,6 +1220,7 @@ export class NagiAudioEngine {
     midi: number,
     sourceStart: number,
     sourceEnd: number,
+    dynamic = 0.64,
   ): ToneLayer[] {
     const from = this.orchestrationFrom[role];
     const to = this.orchestrationTarget[role];
@@ -1230,13 +1231,18 @@ export class NagiAudioEngine {
       if (!this.canScheduleSourceWindow(sourceStart, sourceEnd, 1, overlapLimit)) {
         return [];
       }
-      const wave = this.getWaveForInstrument(instrument, midi);
-      return wave
+      const sample = this.sampleBank?.get(
+        instrument,
+        midi,
+        dynamic,
+        this.scheduledEvents,
+      );
+      return sample
         ? [{
             instrument,
             level: INSTRUMENT_OUTPUT_TRIM[instrument],
             recipe: INSTRUMENTS[instrument],
-            wave,
+            sample,
           }]
         : [];
     };
@@ -1253,25 +1259,74 @@ export class NagiAudioEngine {
     ) {
       return singleLayer(dominant);
     }
-    const fromWave = this.getWaveForInstrument(from, midi);
-    const toWave = this.getWaveForInstrument(to, midi);
-    if (!fromWave || !toWave) return singleLayer(dominant);
+    const fromSample = this.sampleBank?.get(from, midi, dynamic, this.scheduledEvents);
+    const toSample = this.sampleBank?.get(to, midi, dynamic, this.scheduledEvents);
+    if (!fromSample || !toSample) return singleLayer(dominant);
     return [
       {
         instrument: from,
         level:
           Math.cos(mix * Math.PI * 0.5) * INSTRUMENT_OUTPUT_TRIM[from],
         recipe: INSTRUMENTS[from],
-        wave: fromWave,
+        sample: fromSample,
       },
       {
         instrument: to,
         level:
           Math.sin(mix * Math.PI * 0.5) * INSTRUMENT_OUTPUT_TRIM[to],
         recipe: INSTRUMENTS[to],
-        wave: toWave,
+        sample: toSample,
       },
     ];
+  }
+
+  private createToneSource(
+    layer: ToneLayer,
+    midi: number,
+    start: number,
+    options: {
+      glideSeconds?: number;
+      initialRateScale?: number;
+      previousMidi?: number;
+      rateRampSeconds?: number;
+    } = {},
+  ) {
+    if (!this.context) return undefined;
+    const source = this.context.createBufferSource();
+    source.buffer = layer.sample.buffer;
+    source.loop = layer.sample.loop;
+    if (source.loop) {
+      source.loopStart = layer.sample.loopStart;
+      source.loopEnd = layer.sample.loopEnd;
+    }
+    const targetRate = playbackRateForMidi(midi, layer.sample.rootMidi);
+    const glideSeconds = Math.max(0, options.glideSeconds ?? 0);
+    const rateRampSeconds = Math.max(0, options.rateRampSeconds ?? 0);
+    if (options.previousMidi !== undefined && glideSeconds > 0) {
+      source.playbackRate.setValueAtTime(
+        playbackRateForMidi(options.previousMidi, layer.sample.rootMidi),
+        start,
+      );
+      source.playbackRate.exponentialRampToValueAtTime(
+        targetRate,
+        start + glideSeconds,
+      );
+    } else if ((options.initialRateScale ?? 1) !== 1 && rateRampSeconds > 0) {
+      source.playbackRate.setValueAtTime(
+        targetRate * Math.max(0.01, options.initialRateScale ?? 1),
+        start,
+      );
+      source.playbackRate.exponentialRampToValueAtTime(
+        targetRate,
+        start + rateRampSeconds,
+      );
+    } else {
+      source.playbackRate.setValueAtTime(targetRate, start);
+    }
+    const layerGain = this.context.createGain();
+    layerGain.gain.value = layer.level;
+    source.connect(layerGain);
+    return { layer, layerGain, source };
   }
 
   private textureRoleGain(role: TextureRole) {
@@ -1321,10 +1376,6 @@ export class NagiAudioEngine {
       return densityTrim * (leadActive ? 0.82 : 0.94);
     }
     return (leadActive ? 0.78 : 0.9) * (this.textureState === 'full' ? 1 : 0.86);
-  }
-
-  private getWave(role: keyof OrchestrationPlan, midi = 60) {
-    return this.getWaveForInstrument(this.getInstrument(role), midi);
   }
 
   private beginExpressiveTransition(scene: HarmonicScene, profile: WeatherProfile) {
@@ -1827,25 +1878,27 @@ export class NagiAudioEngine {
       bedBreath *
       gesture.dynamic *
       this.textureRoleGain('harmony');
-    const sourceStart = Math.max(context.currentTime + 0.001, performanceStart - 0.008);
+    const sourceStart = Math.max(context.currentTime + 0.001, performanceStart);
     const sourceEnd = end + 0.025;
-    const toneLayers = this.getToneLayers('harmony', midi, sourceStart, sourceEnd);
+    const toneLayers = this.getToneLayers(
+      'harmony',
+      midi,
+      sourceStart,
+      sourceEnd,
+      gesture.dynamic,
+    );
     if (toneLayers.length === 0) return;
     const toneMixer = context.createGain();
-    const oscillators = toneLayers.map((layer) => {
-      const oscillator = context.createOscillator();
-      const layerGain = context.createGain();
-      oscillator.setPeriodicWave(layer.wave);
-      oscillator.frequency.setValueAtTime(midiToFrequency(midi), performanceStart);
-      layerGain.gain.value = layer.level;
-      oscillator.connect(layerGain);
-      layerGain.connect(toneMixer);
-      return { layer, layerGain, oscillator };
+    const sources = toneLayers.flatMap((layer) => {
+      const voice = this.createToneSource(layer, midi, performanceStart);
+      if (!voice) return [];
+      voice.layerGain.connect(toneMixer);
+      return [voice];
     });
     const detune = this.textureRandom.between(-1.25, 1.25);
-    oscillators.forEach(({ layer, oscillator }) => {
+    sources.forEach(({ layer, source }) => {
       this.scheduleVibrato(
-        oscillator.detune,
+        source.detune,
         performanceStart,
         duration,
         layer.recipe,
@@ -1865,13 +1918,13 @@ export class NagiAudioEngine {
     filter.connect(envelope);
     envelope.connect(panner);
     panner.connect(this.harmonyBus);
-    oscillators.forEach(({ oscillator }) => {
-      oscillator.start(sourceStart);
-      oscillator.stop(sourceEnd);
+    sources.forEach(({ source }) => {
+      source.start(sourceStart);
+      source.stop(sourceEnd);
     });
     this.trackSourceGroup(
-      oscillators.map(({ oscillator }) => oscillator),
-      [toneMixer, ...oscillators.map(({ layerGain }) => layerGain), filter, envelope, panner],
+      sources.map(({ source }) => source),
+      [toneMixer, ...sources.map(({ layerGain }) => layerGain), filter, envelope, panner],
       sourceStart,
       sourceEnd,
     );
@@ -1888,6 +1941,7 @@ export class NagiAudioEngine {
         'harmony',
         panner.pan.value,
         profile,
+        toneLayers,
       );
     }
     this.scheduledEvents += 1;
@@ -1951,27 +2005,28 @@ export class NagiAudioEngine {
       accent *
       gesture.dynamic *
       this.textureRoleGain('bass');
-    const sourceStart = Math.max(context.currentTime + 0.001, performanceStart - 0.008);
+    const sourceStart = Math.max(context.currentTime + 0.001, performanceStart);
     const sourceEnd = end + 0.025;
-    const toneLayers = this.getToneLayers('bass', midi, sourceStart, sourceEnd);
+    const toneLayers = this.getToneLayers(
+      'bass',
+      midi,
+      sourceStart,
+      sourceEnd,
+      gesture.dynamic,
+    );
     if (toneLayers.length === 0) return;
     const toneMixer = context.createGain();
     const baseDetune = this.textureRandom.between(-0.8, 0.8);
-    const oscillators = toneLayers.map((layer) => {
-      const oscillator = context.createOscillator();
-      const layerGain = context.createGain();
-      oscillator.setPeriodicWave(layer.wave);
-      if (gesture.connection.kind === 'portamento' && gesture.connection.glideSeconds > 0) {
-        oscillator.frequency.setValueAtTime(midiToFrequency(previousMidi), performanceStart);
-        oscillator.frequency.exponentialRampToValueAtTime(
-          midiToFrequency(midi),
-          performanceStart + gesture.connection.glideSeconds,
-        );
-      } else {
-        oscillator.frequency.setValueAtTime(midiToFrequency(midi), performanceStart);
-      }
+    const sources = toneLayers.flatMap((layer) => {
+      const voice = this.createToneSource(layer, midi, performanceStart, {
+        glideSeconds: gesture.connection.kind === 'portamento'
+          ? gesture.connection.glideSeconds
+          : 0,
+        previousMidi,
+      });
+      if (!voice) return [];
       this.scheduleVibrato(
-        oscillator.detune,
+        voice.source.detune,
         performanceStart,
         duration,
         layer.recipe,
@@ -1979,10 +2034,8 @@ export class NagiAudioEngine {
         baseDetune,
         gesture.vibrato,
       );
-      layerGain.gain.value = layer.level;
-      oscillator.connect(layerGain);
-      layerGain.connect(toneMixer);
-      return { layerGain, oscillator };
+      voice.layerGain.connect(toneMixer);
+      return [voice];
     });
     envelope.gain.setValueAtTime(0, Math.max(0, performanceStart - 0.008));
     envelope.gain.setValueAtTime(0, performanceStart);
@@ -2000,13 +2053,13 @@ export class NagiAudioEngine {
     toneMixer.connect(filter);
     filter.connect(envelope);
     envelope.connect(this.harmonyBus);
-    oscillators.forEach(({ oscillator }) => {
-      oscillator.start(sourceStart);
-      oscillator.stop(sourceEnd);
+    sources.forEach(({ source }) => {
+      source.start(sourceStart);
+      source.stop(sourceEnd);
     });
     this.trackSourceGroup(
-      oscillators.map(({ oscillator }) => oscillator),
-      [toneMixer, ...oscillators.map(({ layerGain }) => layerGain), filter, envelope],
+      sources.map(({ source }) => source),
+      [toneMixer, ...sources.map(({ layerGain }) => layerGain), filter, envelope],
       sourceStart,
       sourceEnd,
     );
@@ -2019,6 +2072,7 @@ export class NagiAudioEngine {
       'bass',
       0,
       profile,
+      toneLayers,
     );
     this.scheduledEvents += 1;
   }
@@ -2055,20 +2109,22 @@ export class NagiAudioEngine {
     const body = Math.max(0.3, duration * (0.78 + gesture.articulation * 0.18));
     const release = Math.min(1.45, recipe.release * gesture.decay.releaseScale);
     const end = performanceStart + body + release;
-    const sourceStart = Math.max(context.currentTime + 0.001, performanceStart - 0.008);
+    const sourceStart = Math.max(context.currentTime + 0.001, performanceStart);
     const sourceEnd = end + 0.025;
-    const toneLayers = this.getToneLayers('brass', midi, sourceStart, sourceEnd);
+    const toneLayers = this.getToneLayers(
+      'brass',
+      midi,
+      sourceStart,
+      sourceEnd,
+      gesture.dynamic,
+    );
     if (toneLayers.length === 0) return;
     const toneMixer = context.createGain();
-    const oscillators = toneLayers.map((layer) => {
-      const oscillator = context.createOscillator();
-      const layerGain = context.createGain();
-      oscillator.setPeriodicWave(layer.wave);
-      oscillator.frequency.setValueAtTime(midiToFrequency(midi), performanceStart);
-      layerGain.gain.value = layer.level;
-      oscillator.connect(layerGain);
-      layerGain.connect(toneMixer);
-      return { layer, layerGain, oscillator };
+    const sources = toneLayers.flatMap((layer) => {
+      const voice = this.createToneSource(layer, midi, performanceStart);
+      if (!voice) return [];
+      voice.layerGain.connect(toneMixer);
+      return [voice];
     });
     const filter = context.createBiquadFilter();
     filter.type = 'lowpass';
@@ -2095,9 +2151,9 @@ export class NagiAudioEngine {
     envelope.gain.exponentialRampToValueAtTime(0.00001, end - 0.006);
     envelope.gain.linearRampToValueAtTime(0, end);
     const detune = this.textureRandom.between(-1.1, 1.1);
-    oscillators.forEach(({ layer, oscillator }) => {
+    sources.forEach(({ layer, source }) => {
       this.scheduleVibrato(
-        oscillator.detune,
+        source.detune,
         performanceStart,
         body,
         layer.recipe,
@@ -2110,13 +2166,13 @@ export class NagiAudioEngine {
     filter.connect(envelope);
     envelope.connect(panner);
     panner.connect(this.harmonyBus);
-    oscillators.forEach(({ oscillator }) => {
-      oscillator.start(sourceStart);
-      oscillator.stop(sourceEnd);
+    sources.forEach(({ source }) => {
+      source.start(sourceStart);
+      source.stop(sourceEnd);
     });
     this.trackSourceGroup(
-      oscillators.map(({ oscillator }) => oscillator),
-      [toneMixer, ...oscillators.map(({ layerGain }) => layerGain), filter, envelope, panner],
+      sources.map(({ source }) => source),
+      [toneMixer, ...sources.map(({ layerGain }) => layerGain), filter, envelope, panner],
       sourceStart,
       sourceEnd,
     );
@@ -2130,6 +2186,7 @@ export class NagiAudioEngine {
         'brass',
         panner.pan.value,
         profile,
+        toneLayers,
       );
     }
     this.scheduledEvents += 1;
@@ -2145,22 +2202,25 @@ export class NagiAudioEngine {
     const context = this.context;
     const midi = clamp(bassMidi - 7, 36, 48);
     const duration = 1.15 + profile.space * 0.55;
-    const sourceStart = Math.max(context.currentTime + 0.001, start - 0.008);
+    const sourceStart = Math.max(context.currentTime + 0.001, start);
     const sourceEnd = start + duration + 0.025;
-    const toneLayers = this.getToneLayers('percussion', midi, sourceStart, sourceEnd);
+    const toneLayers = this.getToneLayers(
+      'percussion',
+      midi,
+      sourceStart,
+      sourceEnd,
+      clamp(0.55 + accent * 0.32),
+    );
     if (toneLayers.length === 0) return;
     const toneMixer = context.createGain();
-    const oscillators = toneLayers.map((layer) => {
-      const oscillator = context.createOscillator();
-      const layerGain = context.createGain();
-      oscillator.setPeriodicWave(layer.wave);
-      const frequency = midiToFrequency(midi);
-      oscillator.frequency.setValueAtTime(frequency * 1.035, start);
-      oscillator.frequency.exponentialRampToValueAtTime(frequency, start + 0.11);
-      layerGain.gain.value = layer.level;
-      oscillator.connect(layerGain);
-      layerGain.connect(toneMixer);
-      return { layerGain, oscillator };
+    const sources = toneLayers.flatMap((layer) => {
+      const voice = this.createToneSource(layer, midi, start, {
+        initialRateScale: 1.035,
+        rateRampSeconds: 0.11,
+      });
+      if (!voice) return [];
+      voice.layerGain.connect(toneMixer);
+      return [voice];
     });
     const filter = context.createBiquadFilter();
     filter.type = 'lowpass';
@@ -2179,13 +2239,13 @@ export class NagiAudioEngine {
     toneMixer.connect(filter);
     filter.connect(envelope);
     envelope.connect(this.harmonyBus);
-    oscillators.forEach(({ oscillator }) => {
-      oscillator.start(sourceStart);
-      oscillator.stop(sourceEnd);
+    sources.forEach(({ source }) => {
+      source.start(sourceStart);
+      source.stop(sourceEnd);
     });
     this.trackSourceGroup(
-      oscillators.map(({ oscillator }) => oscillator),
-      [toneMixer, ...oscillators.map(({ layerGain }) => layerGain), filter, envelope],
+      sources.map(({ source }) => source),
+      [toneMixer, ...sources.map(({ layerGain }) => layerGain), filter, envelope],
       sourceStart,
       sourceEnd,
     );
@@ -2198,6 +2258,7 @@ export class NagiAudioEngine {
       'percussion',
       0,
       profile,
+      toneLayers,
     );
     this.scheduledEvents += 1;
   }
@@ -2526,25 +2587,22 @@ export class NagiAudioEngine {
       accent *
       dynamic *
       this.textureRoleGain('accompaniment');
-    const sourceStart = Math.max(context.currentTime + 0.001, start - 0.008);
+    const sourceStart = Math.max(context.currentTime + 0.001, start);
     const sourceEnd = end + 0.025;
     const toneLayers = this.getToneLayers(
       'accompaniment',
       midi,
       sourceStart,
       sourceEnd,
+      dynamic,
     );
     if (toneLayers.length === 0) return;
     const toneMixer = context.createGain();
-    const oscillators = toneLayers.map((layer) => {
-      const oscillator = context.createOscillator();
-      const layerGain = context.createGain();
-      oscillator.setPeriodicWave(layer.wave);
-      oscillator.frequency.setValueAtTime(midiToFrequency(midi), start);
-      layerGain.gain.value = layer.level;
-      oscillator.connect(layerGain);
-      layerGain.connect(toneMixer);
-      return { layerGain, oscillator };
+    const sources = toneLayers.flatMap((layer) => {
+      const voice = this.createToneSource(layer, midi, start);
+      if (!voice) return [];
+      voice.layerGain.connect(toneMixer);
+      return [voice];
     });
     const attack = Math.min(body * 0.32, recipe.attack * gesture.attackScale);
     envelope.gain.setValueAtTime(0, Math.max(0, start - 0.008));
@@ -2560,13 +2618,13 @@ export class NagiAudioEngine {
     filter.connect(envelope);
     envelope.connect(panner);
     panner.connect(this.harmonyBus);
-    oscillators.forEach(({ oscillator }) => {
-      oscillator.start(sourceStart);
-      oscillator.stop(sourceEnd);
+    sources.forEach(({ source }) => {
+      source.start(sourceStart);
+      source.stop(sourceEnd);
     });
     this.trackSourceGroup(
-      oscillators.map(({ oscillator }) => oscillator),
-      [toneMixer, ...oscillators.map(({ layerGain }) => layerGain), filter, envelope, panner],
+      sources.map(({ source }) => source),
+      [toneMixer, ...sources.map(({ layerGain }) => layerGain), filter, envelope, panner],
       sourceStart,
       sourceEnd,
     );
@@ -2579,6 +2637,7 @@ export class NagiAudioEngine {
       'accompaniment',
       panner.pan.value,
       profile,
+      toneLayers,
     );
     this.accompanimentPulseEvents += 1;
     this.scheduledEvents += 1;
@@ -2647,9 +2706,15 @@ export class NagiAudioEngine {
       availableDuration,
       (body + release) * (0.9 + profile.space * 0.18),
     );
-    const sourceStart = Math.max(context.currentTime + 0.001, performanceStart - 0.008);
+    const sourceStart = Math.max(context.currentTime + 0.001, performanceStart);
     const sourceEnd = performanceStart + duration + 0.025;
-    const toneLayers = this.getToneLayers(role, midi, sourceStart, sourceEnd);
+    const toneLayers = this.getToneLayers(
+      role,
+      midi,
+      sourceStart,
+      sourceEnd,
+      gesture.dynamic,
+    );
     if (toneLayers.length === 0) return false;
     if (role === 'lead') {
       this.leadContinuousGestureSeconds = gesture.boundary.continuousSecondsAfter;
@@ -2657,24 +2722,16 @@ export class NagiAudioEngine {
       this.counterContinuousGestureSeconds = gesture.boundary.continuousSecondsAfter;
     }
     const toneMixer = context.createGain();
-    const frequency = midiToFrequency(midi);
-    const oscillators = toneLayers.map((layer) => {
-      const oscillator = context.createOscillator();
-      const layerGain = context.createGain();
-      oscillator.setPeriodicWave(layer.wave);
-      if (gesture.connection.kind === 'portamento' && gesture.connection.glideSeconds > 0) {
-        oscillator.frequency.setValueAtTime(midiToFrequency(previousMidi), performanceStart);
-        oscillator.frequency.exponentialRampToValueAtTime(
-          frequency,
-          performanceStart + gesture.connection.glideSeconds,
-        );
-      } else {
-        oscillator.frequency.setValueAtTime(frequency, performanceStart);
-      }
-      layerGain.gain.value = layer.level;
-      oscillator.connect(layerGain);
-      layerGain.connect(toneMixer);
-      return { layer, layerGain, oscillator };
+    const sources = toneLayers.flatMap((layer) => {
+      const voice = this.createToneSource(layer, midi, performanceStart, {
+        glideSeconds: gesture.connection.kind === 'portamento'
+          ? gesture.connection.glideSeconds
+          : 0,
+        previousMidi,
+      });
+      if (!voice) return [];
+      voice.layerGain.connect(toneMixer);
+      return [voice];
     });
     const filter = context.createBiquadFilter();
     filter.type = 'lowpass';
@@ -2755,9 +2812,9 @@ export class NagiAudioEngine {
     );
     envelope.gain.linearRampToValueAtTime(0, performanceStart + duration);
     const baseDetune = this.textureRandom.between(-2.1, 2.1);
-    oscillators.forEach(({ layer, oscillator }) => {
+    sources.forEach(({ layer, source }) => {
       this.scheduleVibrato(
-        oscillator.detune,
+        source.detune,
         performanceStart,
         duration,
         layer.recipe,
@@ -2772,15 +2829,15 @@ export class NagiAudioEngine {
     presence.connect(envelope);
     envelope.connect(panner);
     panner.connect(role === 'lead' ? this.melodyBus : this.effectsBus);
-    oscillators.forEach(({ oscillator }) => {
-      oscillator.start(sourceStart);
-      oscillator.stop(sourceEnd);
+    sources.forEach(({ source }) => {
+      source.start(sourceStart);
+      source.stop(sourceEnd);
     });
     this.trackSourceGroup(
-      oscillators.map(({ oscillator }) => oscillator),
+      sources.map(({ source }) => source),
       [
         toneMixer,
-        ...oscillators.map(({ layerGain }) => layerGain),
+        ...sources.map(({ layerGain }) => layerGain),
         highpass,
         filter,
         presence,
@@ -2799,6 +2856,7 @@ export class NagiAudioEngine {
       role,
       panner.pan.value,
       profile,
+      toneLayers,
     );
     this.scheduledEvents += 1;
     return true;
@@ -2813,6 +2871,7 @@ export class NagiAudioEngine {
     role: keyof OrchestrationPlan,
     pan: number,
     profile: WeatherProfile,
+    toneLayers: readonly ToneLayer[],
   ) {
     if (
       !this.context ||
@@ -2821,9 +2880,13 @@ export class NagiAudioEngine {
       !this.effectsBus ||
       !this.melodyBus
     ) return;
+    // The PCM model already owns every instrument's attack transient. Keep one
+    // supplementary noise source only for looped breath/bow sustain; one-shot
+    // instruments must not pay for or double their embedded excitation.
+    if (!toneLayers.some(({ sample }) => sample.loop)) return;
     const breath = recipe.breath ?? 0;
-    const transient = recipe.transient ?? 0;
-    if (breath + transient < 0.035) return;
+    const transient = 0;
+    if (breath < 0.035) return;
 
     const context = this.context;
     const transientDuration = Math.min(0.12, Math.max(0.035, duration * 0.12));
@@ -2896,16 +2959,26 @@ export class NagiAudioEngine {
     const index = Math.min(voicing.length - 1, Math.floor(this.interactionX * voicing.length));
     const midi = voicing[index] + (this.interactionY < 0.42 ? 12 : 0);
     const duration = 0.85 + energy * 1.45;
-    const sourceStart = Math.max(context.currentTime + 0.001, start - 0.008);
+    const sourceStart = Math.max(context.currentTime + 0.001, start);
     const sourceEnd = start + duration + 0.025;
-    if (!this.canScheduleSourceWindow(sourceStart, sourceEnd)) return;
-    const oscillator = context.createOscillator();
-    const wave = this.getWave('counter', midi);
-    if (!wave) return;
-    oscillator.setPeriodicWave(wave);
-    const frequency = midiToFrequency(midi);
-    oscillator.frequency.setValueAtTime(frequency * (0.985 + energy * 0.025), start);
-    oscillator.frequency.exponentialRampToValueAtTime(frequency, start + 0.28);
+    const toneLayers = this.getToneLayers(
+      'counter',
+      midi,
+      sourceStart,
+      sourceEnd,
+      clamp(0.48 + energy * 0.38),
+    );
+    if (toneLayers.length === 0) return;
+    const toneMixer = context.createGain();
+    const sources = toneLayers.flatMap((layer) => {
+      const voice = this.createToneSource(layer, midi, start, {
+        initialRateScale: 0.985 + energy * 0.025,
+        rateRampSeconds: 0.28,
+      });
+      if (!voice) return [];
+      voice.layerGain.connect(toneMixer);
+      return [voice];
+    });
     const filter = context.createBiquadFilter();
     filter.type = 'bandpass';
     filter.frequency.value = 760 + (1 - this.interactionY) * 2250;
@@ -2919,13 +2992,20 @@ export class NagiAudioEngine {
     envelope.gain.linearRampToValueAtTime(peak, start + 0.025);
     envelope.gain.exponentialRampToValueAtTime(0.00001, start + duration - 0.006);
     envelope.gain.linearRampToValueAtTime(0, start + duration);
-    oscillator.connect(filter);
+    toneMixer.connect(filter);
     filter.connect(envelope);
     envelope.connect(panner);
     panner.connect(this.effectsBus);
-    oscillator.start(sourceStart);
-    oscillator.stop(sourceEnd);
-    this.trackSource(oscillator, [filter, envelope, panner], sourceStart, sourceEnd);
+    sources.forEach(({ source }) => {
+      source.start(sourceStart);
+      source.stop(sourceEnd);
+    });
+    this.trackSourceGroup(
+      sources.map(({ source }) => source),
+      [toneMixer, ...sources.map(({ layerGain }) => layerGain), filter, envelope, panner],
+      sourceStart,
+      sourceEnd,
+    );
     this.scheduledEvents += 1;
   }
 
@@ -3014,6 +3094,30 @@ export class NagiAudioEngine {
     for (let index = 0; index < length; index += 1) {
       smoothed = smoothed * 0.82 + (random.next() * 2 - 1) * 0.18;
       channel[index] = smoothed;
+    }
+    // Replace the tail with an endpoint-matched stochastic bridge. The shared
+    // noise bed is looped by breath/transient voices, so a raw random seam can
+    // otherwise produce a sample-rate-dependent click every few seconds.
+    const bridgeLength = Math.min(length - 2, Math.ceil(context.sampleRate * 0.08));
+    const bridgeStart = length - bridgeLength;
+    const startValue = channel[bridgeStart];
+    const endValue = channel[0];
+    const startSlope = 0;
+    const endSlope = 0;
+    const originalEnd = channel[length - 1];
+    for (let offset = 0; offset < bridgeLength; offset += 1) {
+      const progress = offset / Math.max(1, bridgeLength - 1);
+      const progress2 = progress * progress;
+      const progress3 = progress2 * progress;
+      const bridge =
+        (2 * progress3 - 3 * progress2 + 1) * startValue +
+        (progress3 - 2 * progress2 + progress) * startSlope +
+        (-2 * progress3 + 3 * progress2) * endValue +
+        (progress3 - progress2) * endSlope;
+      const originalLine = startValue + (originalEnd - startValue) * progress;
+      const residual = channel[bridgeStart + offset] - originalLine;
+      channel[bridgeStart + offset] =
+        bridge + residual * Math.sin(Math.PI * progress) ** 2;
     }
     return buffer;
   }

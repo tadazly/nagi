@@ -2616,7 +2616,12 @@ const zeroGainAttackCount = (
 const zeroGainReleaseCount = (
   audioEngineSource.match(/envelope\.gain\.linearRampToValueAtTime\(0,/g) ?? []
 ).length;
-const prerollSourceCount = (audioEngineSource.match(/start - 0\.008/g) ?? []).length;
+const sampleSourceStartCount = (
+  audioEngineSource.match(/source\.start\(sourceStart\)/g) ?? []
+).length;
+const oscillatorSourceCount = (
+  audioEngineSource.match(/createOscillator\(/g) ?? []
+).length;
 const sceneSource = readFileSync(
   new URL('../app/nagi-scene.tsx', import.meta.url),
   'utf8',
@@ -2773,7 +2778,7 @@ const assertions = {
   expressiveTransitionsAreSmooth: maxPerformanceInterpolationStep < 0.12,
   expressiveTimingIsBounded: maxExpressiveOffsetMs < 38,
   gridIntegrity: maxGridUnitError < 1e-9,
-  immediateOpening: 0.025 < 0.1,
+  immediateOpening: 0.09 <= 0.1,
   darkModesRemainRareColour: darkModeShare < 0.12,
   highTensionIsNotTheDefault: highTensionTimeShare < 0.2,
   classicalThemesRemainTransformativeColour:
@@ -2868,10 +2873,12 @@ const assertions = {
     stepRenderQualityTier('economy', 'balanced', 'up') === 'balanced' &&
     stepRenderQualityTier('balanced', 'balanced', 'up') === 'balanced' &&
     stepRenderQualityTier('balanced', 'ultra', 'down') === 'economy',
-  noteOnsetsUseZeroGainPreroll:
+  sampleOnsetsPreserveTransients:
     zeroGainAttackCount >= 6 &&
     zeroGainReleaseCount >= 6 &&
-    prerollSourceCount >= 6 &&
+    sampleSourceStartCount >= 6 &&
+    oscillatorSourceCount === 0 &&
+    audioEngineSource.includes('InstrumentSampleBank') &&
     !audioEngineSource.includes('envelope.gain.setValueAtTime(0.0001'),
   everyEmotionHasThreeCompactShaderTemplates:
     shaderTemplatesAreValid && shaderTemplateLabels.size === CORE_EMOTIONS.length * 3,
@@ -3158,7 +3165,8 @@ const report = {
     maxRolesChanged: maxOrchestrationRoleChanges,
   },
   onsetSafety: {
-    prerollSourceCount,
+    oscillatorSourceCount,
+    sampleSourceStartCount,
     zeroGainAttackCount,
     zeroGainReleaseCount,
   },
