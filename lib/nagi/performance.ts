@@ -62,6 +62,117 @@ export type PerformancePlan = {
   lead: VoiceExpression;
 };
 
+/** A note's rhetorical job inside a phrase, independent of its instrument. */
+export type PhraseRole =
+  | 'pickup'
+  | 'statement'
+  | 'continuation'
+  | 'climax'
+  | 'cadence'
+  | 'echo';
+
+export type InstrumentFamily =
+  | 'air'
+  | 'bowed'
+  | 'keyboard'
+  | 'plucked'
+  | 'struck'
+  | 'sustained'
+  | 'voice';
+
+export type LegatoKind =
+  | 'detached'
+  | 'fingered-legato'
+  | 'slur'
+  | 'bowed-legato'
+  | 'portamento'
+  | 'overlap';
+
+export type GestureBoundaryKind =
+  | 'none'
+  | 'breath'
+  | 'bow-change'
+  | 'rearticulation';
+
+export type DecayKind = 'natural' | 'sustained';
+
+export type InstrumentGestureProfile = {
+  family: InstrumentFamily;
+  legato: {
+    kind: Exclude<LegatoKind, 'detached' | 'portamento'> | 'none';
+    maxIntervalSemitones: number;
+    overlapSeconds: number;
+    portamentoChance: number;
+    portamentoMaxIntervalSemitones: number;
+    portamentoSeconds: readonly [number, number];
+  };
+  continuity: {
+    boundary: Exclude<GestureBoundaryKind, 'none'> | 'none';
+    maxSeconds: number;
+    resetSeconds: number;
+  };
+  decay: {
+    kind: DecayKind;
+    naturalDecaySeconds: number;
+    sustainLevel: number;
+  };
+  vibrato: {
+    depthScale: number;
+    minimumDurationSeconds: number;
+    onsetSeconds: number;
+    rampSeconds: number;
+  };
+};
+
+export type NoteExpression = VoiceExpression & {
+  phraseRole: PhraseRole;
+};
+
+export type NoteGestureInput = {
+  connectionRandom?: number;
+  continuousGestureSeconds?: number;
+  durationSeconds: number;
+  expression: VoiceExpression;
+  instrument: InstrumentId;
+  intervalSemitones?: number;
+  legatoRequested?: boolean;
+  metricStrength: number;
+  phraseProgress: number;
+  phraseRole?: PhraseRole;
+  variation?: number;
+};
+
+export type NoteGesturePlan = {
+  articulation: number;
+  attackScale: number;
+  boundary: {
+    breakAfterSeconds: number;
+    breakBeforeSeconds: number;
+    continuousSecondsAfter: number;
+    kind: GestureBoundaryKind;
+  };
+  connection: {
+    glideSeconds: number;
+    kind: LegatoKind;
+    overlapSeconds: number;
+  };
+  decay: {
+    kind: DecayKind;
+    naturalDecaySeconds: number;
+    releaseScale: number;
+    sustainLevel: number;
+  };
+  dynamic: number;
+  phraseRole: PhraseRole;
+  vibrato: {
+    depthCents: number;
+    enabled: boolean;
+    onsetSeconds: number;
+    rampSeconds: number;
+    rateHz: number;
+  };
+};
+
 const PARTIAL_COUNT = 9;
 
 export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
@@ -232,6 +343,266 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
     vibratoCents: 0.1,
     vibratoHz: 5.0,
   },
+};
+
+type GestureProfileOptions = {
+  boundary?: InstrumentGestureProfile['continuity']['boundary'];
+  decayKind?: DecayKind;
+  depthScale?: number;
+  family: InstrumentFamily;
+  legatoKind?: InstrumentGestureProfile['legato']['kind'];
+  maxContinuousSeconds?: number;
+  maxIntervalSemitones?: number;
+  naturalDecaySeconds?: number;
+  overlapSeconds?: number;
+  portamentoChance?: number;
+  portamentoMaxIntervalSemitones?: number;
+  portamentoSeconds?: readonly [number, number];
+  resetSeconds?: number;
+  sustainLevel?: number;
+  vibratoMinimumSeconds?: number;
+  vibratoOnsetSeconds?: number;
+  vibratoRampSeconds?: number;
+};
+
+function gestureProfile(options: GestureProfileOptions): InstrumentGestureProfile {
+  return {
+    family: options.family,
+    legato: {
+      kind: options.legatoKind ?? 'none',
+      maxIntervalSemitones: options.maxIntervalSemitones ?? 0,
+      overlapSeconds: options.overlapSeconds ?? 0,
+      portamentoChance: options.portamentoChance ?? 0,
+      portamentoMaxIntervalSemitones:
+        options.portamentoMaxIntervalSemitones ?? 0,
+      portamentoSeconds: options.portamentoSeconds ?? [0, 0],
+    },
+    continuity: {
+      boundary: options.boundary ?? 'none',
+      maxSeconds: options.maxContinuousSeconds ?? Number.POSITIVE_INFINITY,
+      resetSeconds: options.resetSeconds ?? 0,
+    },
+    decay: {
+      kind: options.decayKind ?? 'sustained',
+      naturalDecaySeconds: options.naturalDecaySeconds ?? 0,
+      sustainLevel: options.sustainLevel ?? 0.72,
+    },
+    vibrato: {
+      depthScale: options.depthScale ?? 0,
+      minimumDurationSeconds: options.vibratoMinimumSeconds ?? Number.POSITIVE_INFINITY,
+      onsetSeconds: options.vibratoOnsetSeconds ?? 0,
+      rampSeconds: options.vibratoRampSeconds ?? 0,
+    },
+  };
+}
+
+/**
+ * Physical-performance limits used by the note scheduler. The values are
+ * intentionally conservative: generated gestures should sound playable before
+ * they sound conspicuously expressive.
+ */
+export const INSTRUMENT_GESTURES: Readonly<
+  Record<InstrumentId, InstrumentGestureProfile>
+> = {
+  celesta: gestureProfile({
+    decayKind: 'natural',
+    family: 'struck',
+    naturalDecaySeconds: 1.15,
+    sustainLevel: 0.08,
+  }),
+  flute: gestureProfile({
+    boundary: 'breath',
+    depthScale: 1,
+    family: 'air',
+    legatoKind: 'slur',
+    maxContinuousSeconds: 8.2,
+    maxIntervalSemitones: 12,
+    overlapSeconds: 0.014,
+    resetSeconds: 0.16,
+    sustainLevel: 0.76,
+    vibratoMinimumSeconds: 0.72,
+    vibratoOnsetSeconds: 0.3,
+    vibratoRampSeconds: 0.2,
+  }),
+  clarinet: gestureProfile({
+    boundary: 'breath',
+    depthScale: 0.68,
+    family: 'air',
+    legatoKind: 'fingered-legato',
+    maxContinuousSeconds: 9.4,
+    maxIntervalSemitones: 12,
+    overlapSeconds: 0.012,
+    resetSeconds: 0.14,
+    sustainLevel: 0.8,
+    vibratoMinimumSeconds: 1,
+    vibratoOnsetSeconds: 0.4,
+    vibratoRampSeconds: 0.24,
+  }),
+  violin: gestureProfile({
+    boundary: 'bow-change',
+    depthScale: 1,
+    family: 'bowed',
+    legatoKind: 'bowed-legato',
+    maxContinuousSeconds: 4.8,
+    maxIntervalSemitones: 12,
+    overlapSeconds: 0.018,
+    portamentoChance: 0.2,
+    portamentoMaxIntervalSemitones: 7,
+    portamentoSeconds: [0.035, 0.09],
+    resetSeconds: 0.02,
+    sustainLevel: 0.78,
+    vibratoMinimumSeconds: 0.64,
+    vibratoOnsetSeconds: 0.24,
+    vibratoRampSeconds: 0.18,
+  }),
+  oboe: gestureProfile({
+    boundary: 'breath',
+    depthScale: 0.78,
+    family: 'air',
+    legatoKind: 'slur',
+    maxContinuousSeconds: 7.2,
+    maxIntervalSemitones: 10,
+    overlapSeconds: 0.012,
+    resetSeconds: 0.17,
+    sustainLevel: 0.77,
+    vibratoMinimumSeconds: 0.82,
+    vibratoOnsetSeconds: 0.32,
+    vibratoRampSeconds: 0.22,
+  }),
+  strings: gestureProfile({
+    boundary: 'bow-change',
+    depthScale: 0.66,
+    family: 'bowed',
+    legatoKind: 'bowed-legato',
+    maxContinuousSeconds: 6.4,
+    maxIntervalSemitones: 12,
+    overlapSeconds: 0.032,
+    portamentoChance: 0.06,
+    portamentoMaxIntervalSemitones: 5,
+    portamentoSeconds: [0.04, 0.1],
+    resetSeconds: 0.028,
+    sustainLevel: 0.84,
+    vibratoMinimumSeconds: 0.9,
+    vibratoOnsetSeconds: 0.38,
+    vibratoRampSeconds: 0.3,
+  }),
+  choir: gestureProfile({
+    boundary: 'breath',
+    depthScale: 0.55,
+    family: 'voice',
+    legatoKind: 'overlap',
+    maxContinuousSeconds: 9.2,
+    maxIntervalSemitones: 7,
+    overlapSeconds: 0.04,
+    portamentoChance: 0.08,
+    portamentoMaxIntervalSemitones: 4,
+    portamentoSeconds: [0.045, 0.11],
+    resetSeconds: 0.2,
+    sustainLevel: 0.88,
+    vibratoMinimumSeconds: 1.25,
+    vibratoOnsetSeconds: 0.52,
+    vibratoRampSeconds: 0.34,
+  }),
+  'soft-organ': gestureProfile({
+    family: 'keyboard',
+    legatoKind: 'fingered-legato',
+    maxIntervalSemitones: 12,
+    overlapSeconds: 0.018,
+    sustainLevel: 0.92,
+  }),
+  'soft-horns': gestureProfile({
+    boundary: 'breath',
+    depthScale: 0.42,
+    family: 'air',
+    legatoKind: 'slur',
+    maxContinuousSeconds: 6.8,
+    maxIntervalSemitones: 9,
+    overlapSeconds: 0.018,
+    resetSeconds: 0.2,
+    sustainLevel: 0.85,
+    vibratoMinimumSeconds: 1.3,
+    vibratoOnsetSeconds: 0.52,
+    vibratoRampSeconds: 0.32,
+  }),
+  cello: gestureProfile({
+    boundary: 'bow-change',
+    depthScale: 0.92,
+    family: 'bowed',
+    legatoKind: 'bowed-legato',
+    maxContinuousSeconds: 5.4,
+    maxIntervalSemitones: 12,
+    overlapSeconds: 0.022,
+    portamentoChance: 0.18,
+    portamentoMaxIntervalSemitones: 7,
+    portamentoSeconds: [0.04, 0.1],
+    resetSeconds: 0.024,
+    sustainLevel: 0.8,
+    vibratoMinimumSeconds: 0.7,
+    vibratoOnsetSeconds: 0.28,
+    vibratoRampSeconds: 0.2,
+  }),
+  contrabass: gestureProfile({
+    boundary: 'bow-change',
+    depthScale: 0.62,
+    family: 'bowed',
+    legatoKind: 'bowed-legato',
+    maxContinuousSeconds: 5.2,
+    maxIntervalSemitones: 9,
+    overlapSeconds: 0.024,
+    portamentoChance: 0.07,
+    portamentoMaxIntervalSemitones: 5,
+    portamentoSeconds: [0.045, 0.11],
+    resetSeconds: 0.03,
+    sustainLevel: 0.82,
+    vibratoMinimumSeconds: 0.9,
+    vibratoOnsetSeconds: 0.36,
+    vibratoRampSeconds: 0.26,
+  }),
+  bassoon: gestureProfile({
+    boundary: 'breath',
+    depthScale: 0.58,
+    family: 'air',
+    legatoKind: 'fingered-legato',
+    maxContinuousSeconds: 8,
+    maxIntervalSemitones: 9,
+    overlapSeconds: 0.014,
+    resetSeconds: 0.18,
+    sustainLevel: 0.8,
+    vibratoMinimumSeconds: 1.05,
+    vibratoOnsetSeconds: 0.42,
+    vibratoRampSeconds: 0.26,
+  }),
+  'soft-bass': gestureProfile({
+    family: 'sustained',
+    legatoKind: 'fingered-legato',
+    maxIntervalSemitones: 12,
+    overlapSeconds: 0.02,
+    sustainLevel: 0.9,
+  }),
+  harp: gestureProfile({
+    decayKind: 'natural',
+    family: 'plucked',
+    naturalDecaySeconds: 1.45,
+    sustainLevel: 0.14,
+  }),
+  'felt-piano': gestureProfile({
+    decayKind: 'natural',
+    family: 'struck',
+    naturalDecaySeconds: 1.1,
+    sustainLevel: 0.12,
+  }),
+  pizzicato: gestureProfile({
+    decayKind: 'natural',
+    family: 'plucked',
+    naturalDecaySeconds: 0.5,
+    sustainLevel: 0.06,
+  }),
+  marimba: gestureProfile({
+    decayKind: 'natural',
+    family: 'struck',
+    naturalDecaySeconds: 0.78,
+    sustainLevel: 0.08,
+  }),
 };
 
 type Weighted<T> = { value: T; weight: number };
@@ -496,6 +867,265 @@ export function phraseDynamic(
     0.62,
     1.22,
   );
+}
+
+type PhraseRoleShape = {
+  articulation: number;
+  attack: number;
+  dynamic: number;
+  release: number;
+  swell: number;
+  vibrato: number;
+};
+
+const PHRASE_ROLE_SHAPES: Readonly<Record<PhraseRole, PhraseRoleShape>> = {
+  pickup: {
+    articulation: 0.84,
+    attack: 0.9,
+    dynamic: 0.88,
+    release: 0.8,
+    swell: 0.72,
+    vibrato: 0.5,
+  },
+  statement: {
+    articulation: 0.96,
+    attack: 0.92,
+    dynamic: 1.02,
+    release: 1,
+    swell: 0.92,
+    vibrato: 0.78,
+  },
+  continuation: {
+    articulation: 1,
+    attack: 1,
+    dynamic: 0.98,
+    release: 1,
+    swell: 1,
+    vibrato: 0.9,
+  },
+  climax: {
+    articulation: 1.03,
+    attack: 0.88,
+    dynamic: 1.1,
+    release: 1.06,
+    swell: 1.12,
+    vibrato: 1.12,
+  },
+  cadence: {
+    articulation: 1.05,
+    attack: 1.04,
+    dynamic: 0.94,
+    release: 1.16,
+    swell: 0.84,
+    vibrato: 0.78,
+  },
+  echo: {
+    articulation: 0.9,
+    attack: 1.12,
+    dynamic: 0.79,
+    release: 1.08,
+    swell: 0.62,
+    vibrato: 0.54,
+  },
+};
+
+/**
+ * A deterministic default phrase-role classifier. Callers with structural
+ * knowledge (for example a planned appoggiatura or echo) should pass the role
+ * explicitly to `planNoteGesture` instead.
+ */
+export function inferPhraseRole(
+  phraseProgress: number,
+  metricStrength: number,
+): PhraseRole {
+  const progress = clamp(phraseProgress);
+  const strength = clamp(metricStrength);
+  if (progress < 0.1) return strength < 0.68 ? 'pickup' : 'statement';
+  if (progress >= 0.82) return 'cadence';
+  if (progress >= 0.5 && progress <= 0.72 && strength >= 0.72) return 'climax';
+  return 'continuation';
+}
+
+/** Apply phrase rhetoric to one note without mutating the scene-level plan. */
+export function shapeNoteExpression(
+  expressionState: VoiceExpression,
+  phraseRole: PhraseRole,
+  phraseProgress: number,
+  metricStrength: number,
+  variation = 0,
+): NoteExpression {
+  const shape = PHRASE_ROLE_SHAPES[phraseRole];
+  return {
+    articulation: clamp(
+      expressionState.articulation * shape.articulation,
+      0.32,
+      1.1,
+    ),
+    attackScale: clamp(expressionState.attackScale * shape.attack, 0.5, 1.8),
+    dynamic: clamp(
+      phraseDynamic(
+        expressionState,
+        phraseProgress,
+        metricStrength,
+        clamp(variation, -0.08, 0.08),
+      ) * shape.dynamic,
+      0.58,
+      1.24,
+    ),
+    phraseRole,
+    releaseScale: clamp(
+      expressionState.releaseScale * shape.release,
+      0.5,
+      1.8,
+    ),
+    swell: clamp(expressionState.swell * shape.swell, 0.015, 0.3),
+    vibratoScale: clamp(
+      expressionState.vibratoScale * shape.vibrato,
+      0,
+      1.3,
+    ),
+  };
+}
+
+/**
+ * Resolve a playable note gesture for a concrete instrument. The function is
+ * pure and consumes no random stream; pass a stable [0, 1] draw through
+ * `connectionRandom` when occasional string/voice portamento is desired.
+ */
+export function planNoteGesture(input: NoteGestureInput): NoteGesturePlan {
+  const profile = INSTRUMENT_GESTURES[input.instrument];
+  const recipe = INSTRUMENTS[input.instrument];
+  const duration = Math.max(0.04, input.durationSeconds);
+  const interval = Math.abs(input.intervalSemitones ?? 0);
+  const role = input.phraseRole ?? inferPhraseRole(
+    input.phraseProgress,
+    input.metricStrength,
+  );
+  const shaped = shapeNoteExpression(
+    input.expression,
+    role,
+    input.phraseProgress,
+    input.metricStrength,
+    input.variation,
+  );
+  const continuousBefore = Math.max(0, input.continuousGestureSeconds ?? 0);
+  const continuity = profile.continuity;
+  const hasContinuityLimit = Number.isFinite(continuity.maxSeconds);
+  const exceedsContinuity =
+    hasContinuityLimit && continuousBefore + duration > continuity.maxSeconds;
+  const plannedPhraseReset =
+    hasContinuityLimit &&
+    role === 'statement' &&
+    continuousBefore > continuity.maxSeconds * 0.72;
+  const breakBeforeSeconds = exceedsContinuity || plannedPhraseReset
+    ? continuity.resetSeconds
+    : 0;
+  const breakAfterSeconds =
+    continuity.boundary !== 'none' &&
+    (role === 'cadence' || role === 'echo')
+      ? continuity.resetSeconds
+      : 0;
+  const boundaryKind: GestureBoundaryKind = breakBeforeSeconds > 0 || breakAfterSeconds > 0
+    ? continuity.boundary
+    : profile.decay.kind === 'natural'
+      ? 'rearticulation'
+      : 'none';
+  const continuousAfter = breakAfterSeconds > 0
+    ? 0
+    : (breakBeforeSeconds > 0 ? 0 : continuousBefore) + duration;
+
+  const wantsLegato = input.legatoRequested ?? shaped.articulation >= 0.94;
+  const canConnect =
+    wantsLegato &&
+    breakBeforeSeconds === 0 &&
+    profile.legato.kind !== 'none' &&
+    interval > 0 &&
+    interval <= profile.legato.maxIntervalSemitones;
+  const portamentoRoleScale = role === 'climax'
+    ? 1.18
+    : role === 'cadence'
+      ? 0.42
+      : role === 'pickup' || role === 'echo'
+        ? 0
+        : 1;
+  const portamentoChance =
+    profile.legato.portamentoChance * portamentoRoleScale;
+  const canUsePortamento =
+    canConnect &&
+    interval >= 2 &&
+    interval <= profile.legato.portamentoMaxIntervalSemitones &&
+    clamp(input.connectionRandom ?? 1) < portamentoChance;
+  const portamentoSpan = profile.legato.portamentoSeconds;
+  const portamentoProgress = profile.legato.portamentoMaxIntervalSemitones > 0
+    ? clamp(interval / profile.legato.portamentoMaxIntervalSemitones)
+    : 0;
+  const requestedGlide =
+    portamentoSpan[0] +
+    (portamentoSpan[1] - portamentoSpan[0]) * portamentoProgress;
+  const glideSeconds = canUsePortamento
+    ? Math.min(requestedGlide, duration * 0.22)
+    : 0;
+  const connectionKind: LegatoKind = canUsePortamento
+    ? 'portamento'
+    : canConnect
+      ? profile.legato.kind as Exclude<LegatoKind, 'detached' | 'portamento'>
+      : 'detached';
+  const overlapSeconds = canConnect && !canUsePortamento
+    ? Math.min(profile.legato.overlapSeconds, duration * 0.1)
+    : 0;
+
+  const articulation = profile.decay.kind === 'natural'
+    ? Math.min(shaped.articulation, 0.9)
+    : canConnect
+      ? Math.max(shaped.articulation, 1)
+      : shaped.articulation;
+  const soundingDuration = duration * articulation;
+  const vibratoDepth =
+    recipe.vibratoCents * shaped.vibratoScale * profile.vibrato.depthScale;
+  const vibratoEnabled =
+    soundingDuration >= profile.vibrato.minimumDurationSeconds &&
+    vibratoDepth >= 0.35 &&
+    role !== 'pickup';
+  const vibratoOnset = vibratoEnabled
+    ? Math.min(profile.vibrato.onsetSeconds, soundingDuration * 0.46)
+    : 0;
+  const vibratoRamp = vibratoEnabled
+    ? Math.min(
+        profile.vibrato.rampSeconds,
+        Math.max(0.04, soundingDuration - vibratoOnset),
+      )
+    : 0;
+
+  return {
+    articulation,
+    attackScale: shaped.attackScale * (breakBeforeSeconds > 0 ? 1.08 : 1),
+    boundary: {
+      breakAfterSeconds,
+      breakBeforeSeconds,
+      continuousSecondsAfter: continuousAfter,
+      kind: boundaryKind,
+    },
+    connection: {
+      glideSeconds,
+      kind: connectionKind,
+      overlapSeconds,
+    },
+    decay: {
+      kind: profile.decay.kind,
+      naturalDecaySeconds: profile.decay.naturalDecaySeconds,
+      releaseScale: shaped.releaseScale,
+      sustainLevel: profile.decay.sustainLevel,
+    },
+    dynamic: shaped.dynamic,
+    phraseRole: role,
+    vibrato: {
+      depthCents: vibratoEnabled ? vibratoDepth : 0,
+      enabled: vibratoEnabled,
+      onsetSeconds: vibratoOnset,
+      rampSeconds: vibratoRamp,
+      rateHz: recipe.vibratoHz,
+    },
+  };
 }
 
 function smoothCadence(progress: number) {

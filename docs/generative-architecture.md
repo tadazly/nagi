@@ -51,6 +51,19 @@ scored neighbourhood. The score favours shared material, mood fit, modal
 comfort, and modest tonic distance. A pivot chord is selected for maximal
 common-tone continuity before the new scene begins.
 
+Harmony is no longer selected one chord at a time. At every phrase boundary the
+engine first allocates an exact-bar structural plan with establishment,
+departure, development, cadence preparation and arrival roles. The plan chooses
+authentic, plagal, half, deceptive or modal closure from the current formal
+stage. Cadence degrees are adapted to the active mode and unstable triads are
+substituted before they can occupy a structural cadence position.
+
+The bass is planned over the same phrase rather than being forced to every chord
+root. A bounded dynamic-programming pass balances pedal tones, stepwise motion,
+inversions and cadence-safe root arrivals. The chosen bass pitch is then a hard
+constraint for the normal voice-leading search, so the sounding voicing and the
+reported inversion cannot disagree.
+
 Chord extensions had unreachable thresholds: the scene generator capped
 colour below the old seventh/ninth gates. The gates are now reachable while
 keeping unstable sonorities as passing colour. The 24-hour audit targets an
@@ -70,14 +83,22 @@ harmonic scene before sufficient visual/weather blending; the preferred commit
 point is a phrase boundary, with a late-transition fallback to avoid stalling.
 
 The OpenScore Lieder prior remains a statistical influence for local contour,
-rhythm, metric stability, and bass affinity. Familiar public-domain theme DNA
-is now selected about one third of the time rather than dominating the output.
+rhythm, metric stability, cadence motion and bass affinity. Runtime metric
+conditioning now receives the generated note's real onset and meter instead of
+inferring a false beat class from its index. Corpus motif n-grams and cadence
+intervals, which were previously trained but unused, now shape phrase identity
+and final motion. Familiar public-domain theme DNA is selected about eighteen
+percent of the time so that named quotations remain rare colour.
 When selected it is rotated, re-based, and frequently inverted or retrograded;
 rhythm is also rotated and scaled. Mutation remains periodic rather than
 per-note, so identity survives many cycles while the music avoids literal,
-repetitive quotation. Lead and
-counterpoint use a dedicated random domain and retain independent onset grids,
-resolution pressure, register, and roughness constraints.
+repetitive quotation. Lead and counterpoint are planned as a pair in one random
+domain. Counter onsets are moved before its motif cursor advances, so discarded
+collisions can no longer punch holes in the heard motif; contrary and oblique
+responses are preferred while both voices retain independent rhythm, register,
+resolution pressure and roughness constraints. Non-chord tones may cross an
+ordinary harmony change, with strong resolution pressure reserved for the true
+phrase cadence.
 
 ### Orchestration and digital synthesis
 
@@ -86,6 +107,15 @@ now behave like orchestral hand-offs: one role normally changes, and at most
 two change in development or intensification. Instrument continuity is part of
 the sampling weight and lead/counter collision correction stays inside that
 budget.
+
+Performance is resolved per note and per concrete instrument. All seventeen
+recipes declare a physical gesture family, playable legato behavior, breath or
+bow capacity, natural or sustained decay, and duration-dependent vibrato onset.
+Only instruments that explicitly permit portamento can glide between pitches;
+struck and plucked instruments rearticulate and decay, while winds and strings
+insert bounded breath or bow changes at phrase roles. Pickup, statement,
+continuation, climax, cadence and echo roles shape local dynamics and
+articulation without adding random timing jitter.
 
 The oscillator model is no longer only a static harmonic array. Periodic waves
 are cached by instrument morph and pitch bucket, high partials are attenuated
@@ -159,14 +189,19 @@ covers, among other checks:
 - 24 hours of transport with no cumulative grid drift and at most 40 sources;
 - all twelve keys, at least eight modes, all meters and all formal stages;
 - phrase-boundary integrity, gradual tempo, common-tone modal transitions and
-  pivot continuity;
-- motif identity, melodic singability, counterpoint independence, cadence and
-  resolution quality, roughness and parallel-motion limits;
+  pivot continuity, plus all five planned cadence types and exact arrivals;
+- motif identity, real-onset corpus conditioning, melodic singability,
+  contrary/oblique counterpoint, cadence and resolution quality, roughness and
+  parallel-motion limits;
+- non-root bass coverage, pedal/stepwise motion, a seven-semitone bass-leap cap,
+  phrase recurrence, and unstable-triad limits;
 - deterministic independent random domains and all three visual variants;
 - deterministic platform quality plans, an SMAA fallback when MSAA is
   unavailable, and recovery bounded by the platform ceiling;
-- all seventeen instruments, no more than two changed roles per formal hand-off,
-  expression interpolation, and fourteen noise/transient recipes;
+- 512 complete multi-seed emotional journeys with bright/high-tempo coverage;
+- all seventeen instruments, idiomatic connection/decay/breath/vibrato plans,
+  no more than two changed roles per formal hand-off, expression interpolation,
+  and fourteen noise/transient recipes;
 - stable shader cells, complete palette/template coverage, zero-gain onset and
   release scheduling, and smooth transition endpoints.
 

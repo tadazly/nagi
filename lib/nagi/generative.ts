@@ -101,6 +101,96 @@ export type MeterDefinition = {
 
 export type HarmonicFunction = 'tonic' | 'predominant' | 'dominant' | 'color';
 
+export type CadenceType =
+  | 'authentic'
+  | 'plagal'
+  | 'half'
+  | 'deceptive'
+  | 'modal';
+
+export type PhraseHarmonicGoal =
+  | 'statement'
+  | 'continuation'
+  | 'question'
+  | 'intensify'
+  | 'release'
+  | 'resolve';
+
+export type HarmonicStructuralRole =
+  | 'establish'
+  | 'departure'
+  | 'development'
+  | 'cadence-preparation'
+  | 'cadence-arrival';
+
+export type CadenceRecipe = {
+  arrivalDegree: number;
+  degrees: readonly number[];
+  modeAwareName: string;
+  strength: number;
+  type: CadenceType;
+  usesLeadingTone: boolean;
+};
+
+export type PhraseHarmonyEvent = {
+  cadential: boolean;
+  degree: number;
+  harmonicFunction: HarmonicFunction;
+  index: number;
+  spanBars: number;
+  startBar: number;
+  structuralRole: HarmonicStructuralRole;
+  tensionTarget: number;
+};
+
+export type PhraseHarmonicPlan = {
+  cadence: CadenceRecipe;
+  events: readonly PhraseHarmonyEvent[];
+  goal: PhraseHarmonicGoal;
+  phraseBars: number;
+};
+
+export type PhraseHarmonyOptions = {
+  cadenceType?: CadenceType;
+  goal?: PhraseHarmonicGoal;
+  phraseBars?: number;
+  startDegree?: number;
+};
+
+export type ChordInversion = 0 | 1 | 2 | 3;
+
+export type BassMotion = 'initial' | 'pedal' | 'stepwise' | 'leap';
+
+export type BassLineEvent = {
+  bassMidi: number;
+  bassPitchClass: number;
+  degree: number;
+  inversion: ChordInversion;
+  motion: BassMotion;
+  spanBars: number;
+  startBar: number;
+};
+
+export type BassLinePlan = {
+  events: readonly BassLineEvent[];
+  nonRootBassCount: number;
+  pedalMotionCount: number;
+  stepwiseMotionCount: number;
+};
+
+export type BassLineOptions = {
+  highMidi?: number;
+  lowMidi?: number;
+  pedalStrength?: number;
+  previousBassMidi?: number;
+  stepwiseStrength?: number;
+};
+
+export type ChordVoicingOptions = {
+  bassMidi?: number;
+  inversion?: ChordInversion;
+};
+
 export type HarmonicScene = {
   arousal: number;
   cadenceBias: number;
@@ -492,6 +582,152 @@ export const degreeTriadComfort = (scene: HarmonicScene, degree: number) => {
   return 0.38;
 };
 
+const modeHasLeadingTone = (scene: HarmonicScene) =>
+  MODES[scene.modeIndex].intervals.includes(11);
+
+const stableCadenceDegree = (
+  scene: HarmonicScene,
+  preferred: number,
+  alternatives: readonly number[],
+) => [preferred, ...alternatives].find(
+  (degree) => degreeTriadComfort(scene, degree) >= 0.5,
+) ?? preferred;
+
+const modalCadenceDegrees = (scene: HarmonicScene) => {
+  const modeId = MODES[scene.modeIndex].id;
+  if (modeId === 'phrygian' || modeId === 'neapolitan-major') {
+    return {
+      degrees: [3, 1, 0] as const,
+      name: '♭II–I Phrygian cadence',
+    };
+  }
+  if (modeId === 'lydian') {
+    return {
+      degrees: [1, 4, 0] as const,
+      name: 'II–V–I Lydian cadence',
+    };
+  }
+  if (
+    modeId === 'dorian' ||
+    modeId === 'mixolydian' ||
+    modeId === 'aeolian' ||
+    modeId === 'dorian-sharp-four' ||
+    modeId === 'lydian-dominant'
+  ) {
+    return {
+      degrees: [3, 6, 0] as const,
+      name: 'IV–♭VII–I modal cadence',
+    };
+  }
+  return {
+    degrees: [3, 0] as const,
+    name: 'IV–I modal cadence',
+  };
+};
+
+export const cadenceRecipeForScene = (
+  scene: HarmonicScene,
+  type: CadenceType,
+): CadenceRecipe => {
+  const usesLeadingTone = modeHasLeadingTone(scene);
+  const predominantDegree = stableCadenceDegree(scene, 3, [1, 5, 2]);
+  const dominantDegree = stableCadenceDegree(scene, 4, [6, 1, 2]);
+  const deceptiveArrival = stableCadenceDegree(scene, 5, [2, 3, 0]);
+  if (type === 'modal') {
+    const modal = modalCadenceDegrees(scene);
+    const modalDegrees = modal.degrees.map((degree, index) =>
+      index === modal.degrees.length - 1
+        ? 0
+        : stableCadenceDegree(scene, degree, [1, 3, 4, 6, 5, 2]),
+    );
+    return {
+      arrivalDegree: 0,
+      degrees: modalDegrees,
+      modeAwareName: modal.name,
+      strength: scene.tension > 0.62 ? 0.76 : 0.84,
+      type,
+      usesLeadingTone: false,
+    };
+  }
+  if (type === 'plagal') {
+    return {
+      arrivalDegree: 0,
+      degrees: [predominantDegree, 0],
+      modeAwareName: 'IV–I plagal cadence',
+      strength: 0.76,
+      type,
+      usesLeadingTone: false,
+    };
+  }
+  if (type === 'half') {
+    return {
+      arrivalDegree: dominantDegree,
+      degrees: [
+        stableCadenceDegree(scene, 1, [3, 5, 2]),
+        predominantDegree,
+        dominantDegree,
+      ],
+      modeAwareName: usesLeadingTone
+        ? 'predominant–V half cadence'
+        : 'modal dominant half cadence',
+      strength: usesLeadingTone ? 0.68 : 0.58,
+      type,
+      usesLeadingTone,
+    };
+  }
+  if (type === 'deceptive') {
+    return {
+      arrivalDegree: deceptiveArrival,
+      degrees: [predominantDegree, dominantDegree, deceptiveArrival],
+      modeAwareName: usesLeadingTone
+        ? 'IV–V–VI deceptive cadence'
+        : 'modal V–VI evasion',
+      strength: usesLeadingTone ? 0.64 : 0.52,
+      type,
+      usesLeadingTone,
+    };
+  }
+  return {
+    arrivalDegree: 0,
+    degrees: [predominantDegree, dominantDegree, 0],
+    modeAwareName: usesLeadingTone
+      ? 'IV–V–I authentic cadence'
+      : 'modal V–I cadence',
+    strength: usesLeadingTone ? 1 : 0.7,
+    type,
+    usesLeadingTone,
+  };
+};
+
+export const chooseCadenceType = (
+  scene: HarmonicScene,
+  random: SeededRandom,
+  goal: PhraseHarmonicGoal = 'resolve',
+): CadenceType => {
+  const hasLeadingTone = modeHasLeadingTone(scene);
+  const modalWeight = hasLeadingTone ? 0.16 : 1.1;
+  const goalWeights: Record<PhraseHarmonicGoal, readonly number[]> = {
+    statement: [hasLeadingTone ? 0.8 : 0.28, 0.8, 0.12, 0.08, modalWeight],
+    continuation: [0.2, 0.24, 1, 0.42, modalWeight * 0.72],
+    question: [0.08, 0.06, 1.5, 0.32, modalWeight * 0.38],
+    intensify: [0.22, 0.08, 1.2, 0.86, modalWeight * 0.38],
+    release: [0.3, 1.12, 0.12, 0.5, modalWeight],
+    resolve: [hasLeadingTone ? 1.5 : 0.38, 0.82, 0.04, 0.08, modalWeight],
+  };
+  const types: readonly CadenceType[] = [
+    'authentic',
+    'plagal',
+    'half',
+    'deceptive',
+    'modal',
+  ];
+  const weights = [...goalWeights[goal]];
+  weights[0] *= 0.65 + scene.cadenceBias * 0.8;
+  weights[2] *= 0.72 + scene.tension * 0.72;
+  weights[3] *= 0.64 + scene.tension * 0.82;
+  return types[weightedIndex(weights, random)];
+};
+
 export const chooseNextDegree = (
   currentDegree: number,
   scene: HarmonicScene,
@@ -583,18 +819,40 @@ export const emotionalFormFromSeed = (seed: string): EmotionalFormPlan => {
     'release',
     'return',
   ];
-  const stages = shape.map(([arousal, valence, tension], index) => ({
-      arousalDelta: arousal * intensity,
-      id: ids[index],
-      tensionDelta: tension * intensity,
+  const stages = shape.map(([arousal, valence, tension], index) => {
+    const id = ids[index];
+    return {
+      arousalDelta: id === 'intensification'
+        ? Math.max(arousal * intensity, 0.14)
+        : arousal * intensity,
+      id,
+      tensionDelta: id === 'intensification'
+        ? Math.max(tension * intensity, 0.055)
+        : tension * intensity,
       valenceDelta: valence * valenceDirection,
-    }));
-  const emotionJourney: EmotionName[] = [random.pick(CORE_EMOTIONS)];
+    };
+  });
+  const initialEmotion = random.pick(CORE_EMOTIONS);
+  const positiveJourney =
+    valenceDirection > 0 && EMOTION_PRESETS[initialEmotion].valence >= 0.5;
+  const emotionJourney: EmotionName[] = [initialEmotion];
   for (let index = 1; index < stages.length; index += 1) {
     const previous = EMOTION_PRESETS[emotionJourney[index - 1]];
     const stage = stages[index];
-    const targetArousal = clamp(previous.arousal + stage.arousalDelta * 1.8);
-    const targetValence = clamp(previous.valence + stage.valenceDelta * 1.5);
+    const targetArousal = clamp(
+      Math.max(
+        previous.arousal + stage.arousalDelta * 1.8,
+        positiveJourney && stage.id === 'development'
+          ? 0.58
+          : positiveJourney && stage.id === 'intensification'
+            ? 0.82
+            : 0,
+      ),
+    );
+    const targetValence = clamp(Math.max(
+      previous.valence + stage.valenceDelta * 1.5,
+      positiveJourney && stage.id === 'intensification' ? 0.72 : 0,
+    ));
     const targetTension = clamp(previous.tension + stage.tensionDelta * 1.7);
     const weights = CORE_EMOTIONS.map((emotion) => {
       const preset = EMOTION_PRESETS[emotion];
@@ -640,6 +898,16 @@ export const emotionalFormEmotionAt = (
   return form.emotionJourney[stageIndex];
 };
 
+export const phraseHarmonicGoalForFormStage = (
+  stage: EmotionalFormStage,
+): PhraseHarmonicGoal => {
+  if (stage.id === 'development') return 'continuation';
+  if (stage.id === 'intensification') return 'intensify';
+  if (stage.id === 'release') return 'release';
+  if (stage.id === 'return') return 'resolve';
+  return 'statement';
+};
+
 export const shapeSceneWithEmotionalForm = (
   scene: HarmonicScene,
   form: EmotionalFormPlan,
@@ -647,8 +915,18 @@ export const shapeSceneWithEmotionalForm = (
 ): HarmonicScene => {
   const stage = emotionalFormStageAt(form, sceneIndex);
   const emotion = EMOTION_PRESETS[emotionalFormEmotionAt(form, sceneIndex)];
+  const formLift: Record<EmotionalFormStage['id'], number> = {
+    statement: -0.035,
+    development: 0.035,
+    intensification: 0.14,
+    release: 0.025,
+    return: -0.045,
+  };
   const arousal = clamp(
-    scene.arousal * 0.56 + emotion.arousal * 0.44 + stage.arousalDelta * 0.22,
+    scene.arousal * 0.56 +
+      emotion.arousal * 0.44 +
+      stage.arousalDelta * 0.22 +
+      formLift[stage.id],
     0.08,
     0.98,
   );
@@ -714,6 +992,182 @@ export const chordRootMidi = (scene: HarmonicScene, degree: number) => {
   return midi;
 };
 
+export const chordBassPitchClass = (
+  scene: HarmonicScene,
+  degree: number,
+  inversion: ChordInversion = 0,
+) => {
+  const classes = chordPitchClasses(scene, degree);
+  return classes[Math.min(inversion, classes.length - 1)] ?? classes[0] ?? scene.tonic;
+};
+
+type BassCandidate = {
+  inversion: ChordInversion;
+  midi: number;
+};
+
+type BassPathState = BassCandidate & {
+  cost: number;
+  previousIndex: number;
+};
+
+const bassCandidatesForChord = (
+  scene: HarmonicScene,
+  degree: number,
+  lowMidi: number,
+  highMidi: number,
+) => {
+  const classes = chordPitchClasses(scene, degree);
+  const candidates: BassCandidate[] = [];
+  classes.slice(0, 4).forEach((noteClass, classIndex) => {
+    for (let midi = lowMidi; midi <= highMidi; midi += 1) {
+      if (pitchClass(midi) === noteClass) {
+        candidates.push({
+          inversion: Math.min(3, classIndex) as ChordInversion,
+          midi,
+        });
+      }
+    }
+  });
+  return candidates.length > 0
+    ? candidates
+    : [{ inversion: 0 as ChordInversion, midi: chordRootMidi(scene, degree) }];
+};
+
+export const planBassLine = (
+  scene: HarmonicScene,
+  harmony: PhraseHarmonicPlan,
+  random: SeededRandom,
+  options: BassLineOptions = {},
+): BassLinePlan => {
+  const lowMidi = Math.round(options.lowMidi ?? 38);
+  const highMidi = Math.max(lowMidi, Math.round(options.highMidi ?? 55));
+  const pedalStrength = clamp(options.pedalStrength ?? 0.78, 0, 2);
+  const stepwiseStrength = clamp(options.stepwiseStrength ?? 0.86, 0, 2);
+  const layers: BassPathState[][] = [];
+  harmony.events.forEach((event, eventIndex) => {
+    const candidates = bassCandidatesForChord(
+      scene,
+      event.degree,
+      lowMidi,
+      highMidi,
+    );
+    const previousLayer = layers[eventIndex - 1];
+    const isArrival = event.structuralRole === 'cadence-arrival';
+    const states = candidates.map((candidate): BassPathState => {
+      const inversionCost = candidate.inversion === 0
+        ? 0
+        : candidate.inversion === 1
+          ? 0.3
+          : candidate.inversion === 2
+            ? 0.68
+            : 1.05;
+      const registerCost = Math.abs(candidate.midi - 46) * 0.045;
+      const cadenceCost = isArrival && candidate.inversion !== 0
+        ? harmony.cadence.type === 'half'
+          ? 3.2
+          : 8.5
+        : 0;
+      const randomTieBreak = random.next() * 0.055;
+      if (!previousLayer || previousLayer.length === 0) {
+        const previousMidi = options.previousBassMidi;
+        const openingDistance = previousMidi === undefined
+          ? 0
+          : Math.abs(candidate.midi - previousMidi);
+        const openingMotion = openingDistance * 0.28 +
+          Math.max(0, openingDistance - 7) * 4.8;
+        return {
+          ...candidate,
+          cost: inversionCost + registerCost + cadenceCost + openingMotion + randomTieBreak,
+          previousIndex: -1,
+        };
+      }
+      let bestCost = Infinity;
+      let bestPreviousIndex = 0;
+      previousLayer.forEach((previous, previousIndex) => {
+        const distance = Math.abs(candidate.midi - previous.midi);
+        let transitionCost = distance * 0.26;
+        if (distance > 7) transitionCost += (distance - 7) * 1.45;
+        if (distance === 0) transitionCost -= pedalStrength * 1.55;
+        else if (distance <= 2) transitionCost -= stepwiseStrength * 1.28;
+        else if (distance <= 4) transitionCost -= stepwiseStrength * 0.24;
+        if (
+          harmony.cadence.type === 'authentic' &&
+          event.structuralRole === 'cadence-preparation' &&
+          event.degree === 4 &&
+          candidate.inversion !== 0
+        ) {
+          transitionCost += 2.4;
+        }
+        const total = previous.cost +
+          transitionCost +
+          inversionCost +
+          registerCost +
+          cadenceCost +
+          randomTieBreak;
+        if (total < bestCost) {
+          bestCost = total;
+          bestPreviousIndex = previousIndex;
+        }
+      });
+      return {
+        ...candidate,
+        cost: bestCost,
+        previousIndex: bestPreviousIndex,
+      };
+    });
+    layers.push(states);
+  });
+
+  const selected: BassCandidate[] = Array.from({ length: layers.length });
+  let stateIndex = layers.at(-1)?.reduce(
+    (bestIndex, state, index, states) =>
+      state.cost < states[bestIndex].cost ? index : bestIndex,
+    0,
+  ) ?? -1;
+  for (let eventIndex = layers.length - 1; eventIndex >= 0; eventIndex -= 1) {
+    const state = layers[eventIndex][stateIndex];
+    if (!state) break;
+    selected[eventIndex] = { inversion: state.inversion, midi: state.midi };
+    stateIndex = state.previousIndex;
+  }
+
+  const events = harmony.events.map((event, index): BassLineEvent => {
+    const selectedBass = selected[index] ?? {
+      inversion: 0 as ChordInversion,
+      midi: chordRootMidi(scene, event.degree),
+    };
+    const previousMidi = index === 0
+      ? options.previousBassMidi
+      : selected[index - 1]?.midi;
+    const distance = previousMidi === undefined
+      ? Infinity
+      : Math.abs(selectedBass.midi - previousMidi);
+    const motion: BassMotion = previousMidi === undefined
+      ? 'initial'
+      : distance === 0
+        ? 'pedal'
+        : distance <= 2
+          ? 'stepwise'
+          : 'leap';
+    return {
+      bassMidi: selectedBass.midi,
+      bassPitchClass: pitchClass(selectedBass.midi),
+      degree: event.degree,
+      inversion: selectedBass.inversion,
+      motion,
+      spanBars: event.spanBars,
+      startBar: event.startBar,
+    };
+  });
+  return {
+    events,
+    nonRootBassCount: events.filter((event) => event.inversion !== 0).length,
+    pedalMotionCount: events.filter((event) => event.motion === 'pedal').length,
+    stepwiseMotionCount: events.filter((event) => event.motion === 'stepwise').length,
+  };
+};
+
 const voicingCost = (
   notes: readonly number[],
   previous: readonly number[],
@@ -759,12 +1213,14 @@ const voicingCost = (
         }
       }
     }
-    const leadingTone = pitchClass(scene.tonic + 11);
-    previous.forEach((note, index) => {
-      if (pitchClass(note) === leadingTone && pitchClass(notes[index]) !== pitchClass(scene.tonic)) {
-        cost += 4.6;
-      }
-    });
+    if (modeHasLeadingTone(scene)) {
+      const leadingTone = pitchClass(scene.tonic + 11);
+      previous.forEach((note, index) => {
+        if (pitchClass(note) === leadingTone && pitchClass(notes[index]) !== pitchClass(scene.tonic)) {
+          cost += 4.6;
+        }
+      });
+    }
   } else if (previous.length > 0) {
     cost += notes.reduce(
       (sum, note) => sum + Math.min(...previous.map((old) => Math.abs(note - old))) * 0.26,
@@ -807,6 +1263,7 @@ export const voiceLeadChord = (
   degree: number,
   previous: readonly number[] = [],
   voiceCount = 3,
+  options: ChordVoicingOptions = {},
 ) => {
   const classes = chordPitchClasses(scene, degree);
   const count = Math.round(clamp(voiceCount, 1, 7));
@@ -816,15 +1273,29 @@ export const voiceLeadChord = (
     const low = Math.round(47 + position * 20);
     return [low, Math.min(86, low + 15)] as const;
   });
-  const rootClass = classes[0];
+  const requestedBassMidi = options.bassMidi !== undefined &&
+      classes.includes(pitchClass(options.bassMidi))
+    ? Math.round(options.bassMidi)
+    : undefined;
+  const bassClass = requestedBassMidi === undefined
+    ? chordBassPitchClass(scene, degree, options.inversion ?? 0)
+    : pitchClass(requestedBassMidi);
   const candidates = ranges.map(([low, high], voiceIndex) => {
     const values: number[] = [];
     for (let midi = low; midi <= high; midi += 1) {
-      if (voiceIndex === 0 ? pitchClass(midi) === rootClass : classes.includes(pitchClass(midi))) {
+      if (
+        voiceIndex === 0
+          ? requestedBassMidi === undefined
+            ? pitchClass(midi) === bassClass
+            : midi === requestedBassMidi
+          : classes.includes(pitchClass(midi))
+      ) {
         values.push(midi);
       }
     }
-    const target = previous.length === count && previous[voiceIndex] !== undefined
+    const target = voiceIndex === 0 && requestedBassMidi !== undefined
+      ? requestedBassMidi
+      : previous.length === count && previous[voiceIndex] !== undefined
       ? previous[voiceIndex]
       : voiceIndex === 0
         ? 46
@@ -854,7 +1325,10 @@ export const voiceLeadChord = (
   };
   visit(0, []);
   if (best) return best;
-  const fallback = [chordRootMidi(scene, degree)];
+  let fallbackBass = requestedBassMidi ?? 36 + bassClass;
+  while (fallbackBass < 40) fallbackBass += 12;
+  while (fallbackBass > 55) fallbackBass -= 12;
+  const fallback = [fallbackBass];
   for (let index = 1; index < count; index += 1) {
     const targetClass = classes[index % classes.length];
     let midi = 48 + index * 5;
@@ -1101,6 +1575,134 @@ export const chooseChordSpanBars = (
           ? random.pick([1, 1, 2, 2] as const)
           : random.pick([1, 2, 2, 2, 3] as const);
   return Math.max(1, Math.min(chosen, Math.max(1, Math.floor(remainingPhraseBars))));
+};
+
+const allocatePhraseSpans = (
+  phraseBars: number,
+  eventCount: number,
+  cadenceEventCount: number,
+  random: SeededRandom,
+) => {
+  const spans = Array.from({ length: eventCount }, () => 1);
+  let remaining = phraseBars - eventCount;
+  while (remaining > 0) {
+    const index = weightedIndex(
+      spans.map((span, eventIndex) => {
+        const cadenceIndex = eventIndex - (eventCount - cadenceEventCount);
+        const arrivalWeight = eventIndex === eventCount - 1 ? 1.32 : 1;
+        const cadenceWeight = cadenceIndex >= 0 ? 0.9 : 1;
+        const lengthPenalty = span >= 3 ? 0.16 : span === 2 ? 0.64 : 1;
+        return arrivalWeight * cadenceWeight * lengthPenalty;
+      }),
+      random,
+    );
+    spans[index] += 1;
+    remaining -= 1;
+  }
+  return spans;
+};
+
+const structuralTensionTarget = (
+  role: HarmonicStructuralRole,
+  cadence: CadenceRecipe,
+  scene: HarmonicScene,
+) => {
+  if (role === 'establish') return Math.min(scene.tension, 0.22);
+  if (role === 'departure') return clamp(scene.tension * 0.76 + 0.18, 0.22, 0.58);
+  if (role === 'development') return clamp(scene.tension * 0.82 + 0.24, 0.3, 0.7);
+  if (role === 'cadence-preparation') {
+    return cadence.type === 'plagal' || cadence.type === 'modal' ? 0.56 : 0.78;
+  }
+  if (cadence.type === 'half') return 0.82;
+  if (cadence.type === 'deceptive') return 0.48;
+  return 0.08;
+};
+
+export const planPhraseHarmony = (
+  scene: HarmonicScene,
+  random: SeededRandom,
+  options: PhraseHarmonyOptions = {},
+): PhraseHarmonicPlan => {
+  const phraseBars = Math.max(1, Math.round(options.phraseBars ?? scene.phraseBars));
+  const goal = options.goal ?? (scene.tension > 0.62 ? 'release' : 'resolve');
+  const cadenceType = options.cadenceType ?? chooseCadenceType(scene, random, goal);
+  const cadence = cadenceRecipeForScene(scene, cadenceType);
+  const averageSpan = scene.arousal > 0.72 ? 1.3 : scene.arousal > 0.46 ? 1.65 : 2.15;
+  const minimumEventCount = Math.min(phraseBars, cadence.degrees.length + 2);
+  const eventCount = Math.max(
+    1,
+    Math.min(
+      phraseBars,
+      Math.max(minimumEventCount, Math.round(phraseBars / averageSpan)),
+    ),
+  );
+  const cadenceDegrees = cadence.degrees.slice(-Math.min(cadence.degrees.length, eventCount));
+  const prefixCount = eventCount - cadenceDegrees.length;
+  const planningScene = goal === 'intensify'
+    ? { ...scene, tension: clamp(scene.tension + 0.16) }
+    : goal === 'release'
+      ? { ...scene, tension: clamp(scene.tension - 0.1) }
+      : scene;
+  const degrees: number[] = [];
+  let degree = wrapDegree(options.startDegree ?? 0, MODES[scene.modeIndex].intervals.length);
+  for (let index = 0; index < prefixCount; index += 1) {
+    if (index > 0 || options.startDegree === undefined) {
+      degree = chooseNextDegree(
+        degree,
+        planningScene,
+        random,
+        index / Math.max(1, eventCount - 1),
+      );
+    }
+    degrees.push(degree);
+  }
+  degrees.push(...cadenceDegrees);
+  const spans = allocatePhraseSpans(
+    phraseBars,
+    eventCount,
+    cadenceDegrees.length,
+    random,
+  );
+  let startBar = 0;
+  const events = degrees.map((eventDegree, index): PhraseHarmonyEvent => {
+    const cadenceStart = eventCount - cadenceDegrees.length;
+    const cadential = index >= cadenceStart;
+    const structuralRole: HarmonicStructuralRole = cadential
+      ? index === eventCount - 1
+        ? 'cadence-arrival'
+        : 'cadence-preparation'
+      : index === 0
+        ? 'establish'
+        : index / Math.max(1, cadenceStart) < 0.56
+          ? 'departure'
+          : 'development';
+    const spanBars = spans[index];
+    const event = {
+      cadential,
+      degree: wrapDegree(eventDegree, MODES[scene.modeIndex].intervals.length),
+      harmonicFunction: harmonicFunctionForDegree(scene, eventDegree),
+      index,
+      spanBars,
+      startBar,
+      structuralRole,
+      tensionTarget: structuralTensionTarget(structuralRole, cadence, scene),
+    };
+    startBar += spanBars;
+    return event;
+  });
+  return { cadence, events, goal, phraseBars };
+};
+
+export const phraseHarmonyEventAtBar = (
+  plan: PhraseHarmonicPlan,
+  phraseBar: number,
+) => {
+  if (plan.events.length === 0) return undefined;
+  const normalizedBar = Math.max(0, phraseBar) % Math.max(1, plan.phraseBars);
+  return plan.events.find(
+    (event) => normalizedBar >= event.startBar &&
+      normalizedBar < event.startBar + event.spanBars,
+  ) ?? plan.events.at(-1);
 };
 
 export const isChordTone = (scene: HarmonicScene, degree: number, midi: number) =>
