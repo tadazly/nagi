@@ -23,19 +23,10 @@ import {
   initialEmotionFromSeed,
   profileFromSeed,
   randomSeed,
-  type EmotionName,
   type SeedSnapshot,
 } from '../lib/nagi/generative';
 
 const FALLBACK_SEED = '7F3A91C2';
-const LISTENING_WORLD_LABELS: Partial<Record<EmotionName, string>> = {
-  CALM: 'still water',
-  WARM: 'warm light',
-  DREAMY: 'open sky',
-  NOSTALGIC: 'evening memory',
-};
-const listeningWorldLabel = (emotion: EmotionName) =>
-  LISTENING_WORLD_LABELS[emotion] ?? 'quiet drift';
 const NagiScene = dynamic(
   () => import('./nagi-scene').then((module) => module.NagiScene),
   { ssr: false },
@@ -323,7 +314,7 @@ export default function Home() {
         <h1 id="nagi-title">NAGI</h1>
         <div
           className="nagi-seed"
-          aria-label={`current listening world ${listeningWorldLabel(seedSnapshot.emotion)} ${seedSnapshot.currentSeed}`}
+          aria-label={`current musical state ${seedSnapshot.emotion} ${seedSnapshot.currentSeed}`}
         >
           <span
             style={{
@@ -332,7 +323,7 @@ export default function Home() {
               transform: `translateY(${-outgoingEase * 0.14}rem)`,
             }}
           >
-            {listeningWorldLabel(seedSnapshot.emotion)} · {seedSnapshot.currentSeed}
+            {seedSnapshot.emotion} {seedSnapshot.currentSeed}
           </span>
           {seedSnapshot.incomingSeed && (
             <span
@@ -343,7 +334,7 @@ export default function Home() {
               }}
               aria-hidden="true"
             >
-              {listeningWorldLabel(seedSnapshot.incomingEmotion ?? 'CALM')} · {seedSnapshot.incomingSeed}
+              {seedSnapshot.incomingEmotion} {seedSnapshot.incomingSeed}
             </span>
           )}
         </div>
@@ -358,7 +349,7 @@ export default function Home() {
           aria-label="Enter the NAGI sound space"
         >
           <span aria-hidden="true" />
-          {starting ? 'quiet is arriving' : 'enter the quiet'}
+          {starting ? 'sound is arriving' : 'tap anywhere to listen'}
         </button>
       )}
 
@@ -378,15 +369,15 @@ export default function Home() {
           onClick={toggleMuted}
           aria-label={muted ? 'Unmute sound' : 'Mute sound'}
         >
-          {muted ? 'sound' : 'mute'}
+          {muted ? 'unmute' : 'quiet'}
         </button>
         <span className="nagi-divider" aria-hidden="true" />
         <button
           type="button"
           onClick={randomize}
-          aria-label="Move to a new quiet listening world"
+          aria-label="Randomize the musical and visual seed"
         >
-          new tide
+          random
         </button>
         <label className="nagi-volume">
           <span className="sr-only">Volume</span>

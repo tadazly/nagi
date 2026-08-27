@@ -1,118 +1,370 @@
-# NAGI 放松音乐架构
+# NAGI generative audio-visual architecture
 
-## 1. 为什么重做
+This document records the complete algorithm audit, the musical and visual
+model behind the implementation, and the acceptance criteria used for the
+August 2026 refactor. It is intentionally implementation-facing: every design
+decision below maps to the current source tree and to an automated or live
+browser check.
 
-旧系统把“生成能力强”误当成“好听”：它要求覆盖十二种调式、二十种拟真乐器、多声部对位、铜管与定音鼓、高潮 tutti、重拍不协和及持续的织体变化。测试可以全部通过，但这些指标共同提高了事件密度、频谱复杂度和注意力负担。
+## System inventory
 
-新的目标不是展示作曲算法，而是让人愿意把页面长时间留在身边。系统因此采用减法设计：随机性只负责在安全边界内选择世界、调性和乐句微变化，不再决定每个局部细节是否突然发生。
+| Layer | Source | Generated state |
+| --- | --- | --- |
+| Seed lifecycle | `lib/nagi/generative.ts`, `app/page.tsx` | Cryptographic user seeds, deterministic successor seeds, queued manual changes |
+| Weather | `lib/nagi/generative.ts` | Brightness, density, depth, flow, hue, motion, shape, space, sparkle, spread, warmth |
+| Macro form | `lib/nagi/generative.ts` | Statement, development, intensification, release, true opening recall; twelve emotional identities |
+| Harmony | `lib/nagi/generative.ts` | Twelve mode-specific grammars, tonal centres, A/A′/B/A″ phrase memory, pivots, voice leading |
+| Rhythm and motif | `lib/nagi/composition.ts`, `lib/nagi/phrase-melody.ts`, `lib/nagi/classical-prior.ts` | Whole-phrase melodic skeletons, climax/cadence plans, corpus-informed motifs, realized counterpoint |
+| Orchestration | `lib/nagi/performance.ts`, `lib/nagi/texture-planning.ts` | Five phrase roles plus structural brass/percussion, twenty instruments, sparse-to-tutti texture plans and hand-offs |
+| Synthesis and mix | `lib/nagi/audio-engine.ts` | Additive waves, filtered noise/transients, envelopes, vibrato, delay, convolution, dynamics |
+| Interaction | `app/page.tsx`, `lib/nagi/audio-engine.ts` | Pointer energy, spatial movement, short quantized tonal ripples, playback and volume |
+| Visual generation | `app/nagi-scene.tsx`, `lib/nagi/visual-presets.ts` | 36 emotion-specific shader templates, palettes, weather, core geometry, particles and post FX |
+| Long-run audit | `scripts/soak-audit.mjs` | 24 simulated hours plus 2,048-seed distribution and determinism sweeps |
 
-## 2. 研究转译
+No uncontrolled `Math.random()` path remains. A displayed eight-digit seed is
+the identity of a reproducible state; `crypto.getRandomValues()` is used only
+to request a new identity.
 
-NAGI 不把任何单一论文当成“悦耳公式”，而是把重复出现的证据转成保守边界：
+## Audit findings and implemented decisions
 
-- Bernardi 等人的生理实验发现，速度是唤醒反应的重要因素，慢速或冥想音乐更容易产生放松效果，而停顿的效果尤其明显。因此速度被限定在 `54–63 BPM`，每个八小节乐句保留一整小节不产生新材料。[PubMed](https://pubmed.ncbi.nlm.nih.gov/16199412/)
-- Staum 与 Brotons 的实验中，参与者整体明显偏好较低音量的放松音乐。因此 master 默认电平、单音增益和压缩比都保持克制。[PubMed](https://pubmed.ncbi.nlm.nih.gov/10806471/)
-- Lahdelma 与 Eerola 的实验显示，roughness 与 pleasantness、harmoniousness 和 preference 呈负相关；熟悉度也有独立影响。因此系统使用熟悉的开放和声，禁止持续半音碰撞，并直接审计和弦 roughness。[PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC7250829/)
-- 放松感同时受 tempo、mode、和声/节奏/旋律复杂度、音色、音域与动态变化影响，而且个人偏好非常重要。因此系统提供四个性格不同但都低唤醒的聆听世界，而不是只输出一条所谓“科学最佳”的音乐。[PubMed](https://pubmed.ncbi.nlm.nih.gov/26753216/)
-- 音频特征研究常把 spectral centroid、sharpness、harmonicity、energy、loudness 和 spectral flux 作为与焦虑或情绪相关的描述量。NAGI 因而同时限制高次谐波、低通范围、增益和事件变化率。[PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC8775969/)
+### Random architecture
 
-这些约束只能提高“更可能适合放松”的概率，不能代替真实听者偏好。seed 可复现正是为了让喜欢的状态可以被保留和分享。
+Previously, one mutable pseudo-random stream drove harmony, melody,
+orchestration, performance, timbre detail, and atmosphere. A new branch in any
+one subsystem therefore changed every later decision while the displayed seed
+remained the same. Visual template selection also used a large floating-point
+`sin()` hash, which is not a reliable cross-device identity function.
 
-## 3. 数据流
+The engine now derives independent 32-bit streams for harmony, melody,
+orchestration, performance, timbre detail, and atmosphere. Domain hashing uses
+integer avalanche mixing; the visual template index uses the same integer
+family. Adding an atmospheric draw can no longer rewrite the melody or chord
+sequence. Repeated Random commands are serialized: one transition runs while
+the newest request waits in a one-item queue.
 
-```mermaid
-flowchart LR
-    S[8 位 seed] --> P[ListeningProfile]
-    P --> C[32 小节 AmbientCycle]
-    C --> H[开放三音 pad]
-    C --> M[单线 breath / bell]
-    H --> G[soft mix graph]
-    M --> G
-    A[低电平 air bed] --> G
-    G --> O[浏览器输出]
-    C --> T[transport bands]
-    T --> V[低强度 Shader 呼吸]
-```
+### Harmony, mode and voice leading
 
-`ambient-score.ts` 是纯函数层；给定 seed 与 cycle index，输出完全确定的 `AmbientCycle`。`audio-engine.ts` 只负责把已规划事件按时间送入 Web Audio 图，不在 scheduler 内临时“灵感式”抽签。
+Uniform key/mode jumps were too abrupt even when the final moods were close.
+Candidate scenes are now searched across musically useful root moves and all
+twelve modes, rejected below four shared scale tones, then sampled from a
+scored neighbourhood. The score favours shared material, mood fit, modal
+comfort, and modest tonic distance. A pivot chord is selected for maximal
+common-tone continuity before the new scene begins.
 
-## 4. 乐谱模型
+Harmony is no longer selected one chord at a time. At every phrase boundary the
+engine first allocates an exact-bar structural plan with establishment,
+departure, development, cadence preparation and arrival roles. The plan chooses
+authentic, plagal, half, deceptive or modal closure from the current formal
+stage. Cadence degrees are adapted to the active mode and unstable triads are
+substituted before they can occupy a structural cadence position.
 
-### 四个聆听世界
+Every mode now owns a separate harmonic grammar: functional-degree labels,
+root preferences, identity-bearing characteristic tones, and a dedicated modal
+cadence. Coverage of twelve scales therefore produces twelve harmonic dialects
+rather than one major/minor grammar transposed onto different pitch sets.
 
-| world | 显示状态 | 速度范围 | 主要材料 |
-| --- | --- | ---: | --- |
-| `lagoon` | still water | 57–61 | 大调五声音阶、sus 与开放主和弦 |
-| `hearth` | warm light | 59–63 | 大调五声音阶、关系小和弦与 IV |
-| `cloud` | open sky | 55–59 | Dorian 五声音阶、开放小三和弦与 sus4 |
-| `memory` | evening memory | 54–58 | 较慢的大调五声音阶、关系小和弦与回归 |
+Phrases participate in an explicit A, A′, B, A″ memory cycle. A′ preserves the
+recognisable harmonic skeleton with limited functional substitutions, B creates
+contrast, and A″ recalls the opening while recomposing its middle and cadence.
+The return stage also draws the scene itself back toward the opening tonic,
+mode, meter and emotional state. Automatic seed changes wait until one complete
+formal cycle has finished, and scene duration is measured in bars rather than
+chord-event count.
 
-所有世界共享以下硬约束：
+The bass is planned over the same phrase rather than being forced to every chord
+root. A bounded dynamic-programming pass balances pedal tones, stepwise motion,
+inversions and cadence-safe root arrivals. The chosen bass pitch is then a hard
+constraint for the normal voice-leading search, so the sounding voicing and the
+reported inversion cannot disagree.
 
-- 每个和弦正好三个音；最低两个声部至少相隔七个半音。
-- 同一和弦的 psychoacoustic roughness proxy 不超过 `0.065`。
-- 相邻和弦交接不存在半音碰撞；pad 会先呼出，再让新和弦呼入。
-- 每个周期 32 小节，由 `A / A′ / B / A″` 四个八小节乐句组成。
-- 每个乐句只有六个旋律事件；第 29–32 拍不产生任何新和声或旋律。
-- 旋律限定在五声音阶窄音域，最大跳进七个半音；强拍必须是当前和弦音。
-- `bell` 与 `breath` 的完整包络不会互相叠加，避免单线旋律变成意外复调。
+Chord extensions had unreachable thresholds: the scene generator capped
+colour below the old seventh/ninth gates. The gates are now reachable while
+keeping unstable sonorities as passing colour. The 24-hour audit targets an
+82–95% triad share instead of treating either 100% triads or constant extended
+harmony as desirable. Low-register spacing, sensory roughness, parallel
+perfect motion, strong-beat consonance, and resolution behaviour remain scored
+explicitly.
 
-### 为什么不再自动换情绪
+Tension is no longer read from one Ionian-shaped seven-degree table for every
+mode. Each chord now combines its mode-specific harmonic function with triad
+stability and characteristic-colour weight. Mixolydian minor-v, Lydian II and
+Phrygian flat-II therefore do not inherit an unrelated major-key tension value.
 
-系统可以无限循环，但不会自行从 calm 漂移到 tense 或 dark。长时间一致性比“覆盖所有情绪”更适合放松场景。只有用户主动选择 `new tide` 才会换 seed；旧世界先降至近静音，新世界再缓慢出现。
+### Form, rhythm and melody
 
-## 5. 声音设计
+Chord spans previously could jump over an exact phrase boundary. Every span is
+now clamped to the remaining bars, so scene changes and seed changes can land
+on formal boundaries. Tempo moves by at most 1.4% of the current tempo per
+chord (with a small lower bound), replacing an audible fixed 3.2 BPM step.
+Seed transitions use fifth-order smootherstep curves and do not apply a new
+harmonic scene before sufficient visual/weather blending; the preferred commit
+point is a phrase boundary, with a late-transition fallback to avoid stalling.
 
-系统不再伪装成真实钢琴、长笛或弦乐队。低成本物理模型在缺少真实采样细节时容易产生塑料感、循环接缝和不自然的高频；明确承认“这是柔和合成器”反而更连贯。
+The OpenScore Lieder prior remains a statistical influence for local contour,
+rhythm, metric stability, cadence motion and bass affinity. Its conditioned
+second-order interval counts are also exposed as smoothed information cost, so
+complete candidate paths can be compared instead of merely sampling the next
+note. Runtime metric
+conditioning now receives the generated note's real onset and meter instead of
+inferring a false beat class from its index. Corpus motif n-grams and cadence
+intervals, which were previously trained but unused, now shape phrase identity
+and final motion. Familiar public-domain theme DNA is selected about eight
+percent of the time so that named quotations remain a true easter egg.
+When selected it is rotated, re-based, and frequently inverted or retrograded;
+rhythm is also rotated and scaled. Mutation remains periodic rather than
+per-note, so identity survives many cycles while the music avoids literal,
+repetitive quotation. Lead and counterpoint are planned as a pair in one random
+domain. Counter onsets are moved before its motif cursor advances, so discarded
+collisions can no longer punch holes in the heard motif; contrary and oblique
+responses are preferred while both voices retain independent rhythm, register,
+resolution pressure and roughness constraints. A counterpoint window is now
+planned only for the interval in which it can sound; silent pre-entry events no
+longer consume motif phase or random draws. Corpus IOIs are stored in quarter-
+note units and converted to dotted-quarter transport beats in 6/8 before metric
+conditioning. Non-chord tones may cross an
+ordinary harmony change, with strong resolution pressure reserved for the true
+phrase cadence.
 
-三个音色全部只使用递减的整数谐波：
+Melody is now planned once for the complete phrase and sliced into each harmony
+window only at scheduling time. The plan fixes a register arc, one explicit
+climax, cadence approach and arrival, phrase-rhetorical roles, and a sustained
+counterpoint entry/exit window. Appoggiaturas and suspensions are deliberate
+accented dissonances with a required following resolution. After concrete MIDI
+pitches are chosen, counterpoint is reconciled against actual overlapping note
+durations to correct voice crossing, accented vertical dissonance and parallel
+perfect motion.
 
-- `pad`：四个低幅谐波，约 3.8 秒 attack；每个和弦只开三个 oscillator。
-- `breath`：三个谐波、低深度 detune 曲线和 1.1 秒 release；没有额外噪声爆发。
-- `bell`：三个谐波、短 attack、2.5 秒尾音；不使用非整数 partial 制造金属 beating。
+Concrete MIDI realization is no longer greedy at each harmony window. A
+deterministic sixteen-path beam decoder sees the entire phrase and scores corpus
+surprisal, motif pitch-class identity, harmony and metric role, register arc,
+an anticipated unique climax, cadence arrival, repeated notes, leap recovery,
+the harmony/melody surprise budget, bass spacing and concrete counterpoint.
+Climax and cadence are future positional constraints, not wishes that a local
+sampler may later miss. The selected pitches are stored in the phrase plan and
+the real-time scheduler only renders them; `pickMelodyMidi` remains a fallback
+for legacy or interaction-only events.
 
-公共图为：
+The rhythm layer now emits near-connected notated gates and leaves the final
+articulation to the instrument-performance layer. This removes the former
+double shortening that turned a nominally lyrical line into detached single
+notes. Motif breaths use a small metric vocabulary instead of an arbitrary
+continuous range. Phrase openings are bounded, ordinary motion has a seven-
+semitone ceiling, and a leap of a fourth or larger creates strong contrary
+stepwise recovery pressure on the following note. Randomness therefore chooses
+motif and phrase identity; it no longer gets equal authority over every local
+melodic connection.
 
-```text
-voices / air
-  ├─ dry bus ───────────────┐
-  └─ convolver → wet LPF ───┤
-                             ↓
-scene fade → presence LPF → rumble HPF → gentle compressor → master → analyser
-```
+### Orchestration and digital synthesis
 
-混响使用本地生成的双声道衰减 impulse，不请求网络资源。`DynamicsCompressorNode` 只做软保护，参数遵循 Web Audio 标准定义；它不是用来把安静音乐推响。[Web Audio API](https://webaudio.github.io/web-audio-api/)
+A scene change could previously redraw the entire ensemble. Formal boundaries
+now behave like orchestral hand-offs: one role normally changes, and at most
+two change in development or intensification. Instrument continuity is part of
+the sampling weight and lead/counter collision correction stays inside that
+budget.
 
-## 6. 交互与视觉
+The orchestral target is informed by the long-form language represented in
+Apple Music's “澎湃管弦” collection: recognisable thematic material, sectional
+handoffs, sustained development, a structurally earned tutti and release. The
+implementation borrows that large-scale grammar, never any protected melody.
+Woodwind/solo lines, strings/choir beds, low strings and bassoon, and
+keyboard/plucked motion remain the phrase-bearing families. A separate horn,
+trumpet or trombone desk and timpani now enter only during intensification,
+high-tension development or cadential arrival, allowing the same seed to grow
+from chamber transparency into a complete orchestral peak.
 
-指针移动曾会触发可听音符，快速滑动因此能破坏当前和声。现在交互只平滑改变：
+Instrument identity and instrument presence are separate decisions. Each
+phrase receives a texture plan spanning sparse, duo, chamber, full and release
+states. It controls active roles, spotlight, sustained chord-voice count, and
+minimum-duration entrances and exits. Counterpoint and accompaniment are
+phrase-level roles instead of per-chord coin flips. Harmony may genuinely drop
+to zero for an exposed solo, while intensification can reach a bounded five-
+voice chord without making that density the default. Adjacent phrase plans must
+share at least one sounding role, so a new density arc enters by hand-off rather
+than replacing the whole ensemble at the bar line.
 
-- master presence low-pass 的截止频率；
-- air bed 的极小幅度；
-- Shader 中已有的 pointer energy。
+Accompaniment uses retained or deliberately varied meter-specific sustain,
+pulse, arpeggio, syncopated and sparse patterns. Every onset remains quantized
+to the shared transport subdivision; rhythmic variety does not reintroduce an
+independent clock. Pattern `voicingOffset` is now the sole arpeggio voice path;
+changing chord degree no longer rotates that path a second time. Delay taps are
+one-half and one-and-a-half transport beats and follow gradual tempo movement,
+rather than remaining at unrelated fixed millisecond values.
 
-视觉仍读取 `beatPhase`、`barPhase`、`phrase` 与轻微 `pulse`，但 transport 强度被压低；前景不会随每拍闪烁。seed 视觉只会选择 `CALM / WARM / DREAMY / NOSTALGIC` 四类低唤醒状态。
+Performance is resolved per note and per concrete instrument. All twenty
+recipes declare a physical gesture family, playable legato behavior, breath or
+bow capacity, natural or sustained decay, and duration-dependent vibrato onset.
+Only instruments that explicitly permit portamento can glide between pitches;
+struck and plucked instruments rearticulate and decay, while winds and strings
+insert bounded breath or bow changes at phrase roles. Pickup, statement,
+continuation, climax, cadence and echo roles shape local dynamics and
+articulation without adding random timing jitter.
 
-## 7. 验收模型
+Gain staging follows orchestral function rather than applying one generic
+spotlight multiplier. The lead remains the reference plane; counterpoint and
+rhythmic accompaniment yield while it is present, bass retains a stable
+foundation, and upper harmony is equal-power normalized against its sounding
+voice count. Per-instrument perceptual trims compensate for the extra projection
+of bright transient sources such as celesta, violin, oboe, harp, pizzicato and
+marimba after waveform normalization. Dense harmony uses one shared bow/breath
+noise layer instead of one noise source per chord pitch, preventing source-
+budget pressure from deleting arbitrary chord members.
 
-`scripts/music-audit.mjs` 不再测试“乐器够不够多”，而是测试系统是否持续守住边界。当前自动审计：
+The source allocator reserves six slots while upper harmony is scheduled, then
+allows structural bass, cadential brass and percussion to use the full cap.
+The integrated audit now constrains drop rates for every role instead of proving
+only that lead and counterpoint survived.
 
-- 遍历 4,096 个 seed 与 16,384 个完整 cycle；
-- 合计模拟约 600 小时；
-- tempo `54–63 BPM`；
-- 最大和弦 roughness `0.06255`；
-- 最低声部间距 `7` 个半音；
-- 最大旋律跳进 `7` 个半音；
-- 最大旋律密度约 `0.197 events/s`；
-- 每个乐句休止占比 `12.5%`；
-- melodic source 同时数始终为 `1`；
-- visual density 与 motion 同样有低上限；
-- 同一 seed 与 cycle 必须深度相等。
+The oscillator model is no longer only a static harmonic array. Periodic waves
+are cached by instrument morph and pitch bucket, high partials are attenuated
+as they approach Nyquist, and deterministic harmonic phases prevent every
+instrument from sharing the same waveform shape. Fourteen instrument recipes
+now include a breath or transient component. Filtered noise supplies flute,
+reed, string and choir air; short noise transients add the excitation missing
+from celesta, harp, felt piano, pizzicato and marimba. These layers remain under
+the same source cap and envelope safety rules as tonal sources.
 
-运行：
+Instrument hand-offs no longer interpolate two harmonic tables into an
+unidentifiable middle instrument. During a bounded transition, the outgoing and
+incoming instruments sound as separate equal-power layers. The scheduler falls
+back to the dominant layer near the source cap. Note filters now move through
+the gesture envelope so timbre evolves within a note instead of remaining a
+static periodic wave behind a gain envelope.
 
-```bash
-npm run test:music
-```
+Convolution reverb now uses equal-power-inspired dry/wet gains instead of two
+independently linear levels. Master smoothing, rumble removal, presence control,
+compression and limiting remain downstream. Live acceptance watches RMS, peak,
+sample discontinuity, limiter reduction, active source count and scheduler
+recovery rather than equating successful construction of an AudioContext with
+audio quality.
 
-自动审计不能证明每个人都会喜欢，但它可以阻止旧问题复发：密集声部、突然高唤醒状态、半音堆叠、无限尾音、过亮频谱和没有呼吸的连续填充。
+### Interactive audio
+
+Pointer position still affects spatial focus and spectral brightness through
+smoothed parameters. Audible ripples are scheduled on the nearest subdivision
+only when that grid point is within 90 ms; otherwise they play immediately.
+This preserves responsiveness while allowing gestures that are already close
+to the beat to feel rhythmically attached. Source count and retrigger limits
+prevent dense pointer motion from overwhelming the composition.
+
+### Shader and music visualisation
+
+The visual generator has two timescales. Weather and template weights move on
+the long seed curve; audio transport drives only subtle background pulse,
+beat/bar phase, phrase light, and tension. Foreground geometry deliberately
+avoids raw beat deformation so it breathes rather than flashes.
+
+The old sparkle field put time inside `floor()`, causing entire random cells to
+pop. Cells are now spatially stable and their brightness drifts continuously.
+Hard high-power masks for stars, crystals, lattice and ribbons were replaced by
+band-limited smooth thresholds, reducing pixel shimmer. The CPU chooses one of
+three templates per emotion with an integer seed hash; shader noise is used for
+texture, not identity. Renderer diagnostics now report the real audio pulse.
+Rendering quality is selected from economy, balanced, quality and ultra plans.
+The initial ceiling combines viewport pixel load, pointer class, logical cores
+and reported device memory; the live WebGL renderer then clamps MSAA to its
+actual sample limit and enables half-float post-processing only when the color
+buffer extension is present. Economy devices use SMAA with a 1x DPR cap, while
+faster devices progressively raise geometry detail and DPR and use 2x or 4x
+MSAA. This keeps every tier antialiased instead of treating antialiasing as an
+all-or-nothing performance switch. The default canvas framebuffer leaves its
+redundant MSAA disabled because all scene geometry is rendered through the
+composer's antialiased offscreen target.
+
+A runtime controller uses an exponentially smoothed frame time after a warm-up
+period. Four sustained seconds below roughly 45 FPS lower one tier; eighteen
+sustained seconds near 60 FPS recover one tier, never above the detected
+platform ceiling. Cooldowns and opposing counters prevent rapid quality
+oscillation. Viewport or display changes recompute the ceiling and DPR without
+discarding a performance-driven downgrade.
+
+### Interaction and accessibility
+
+The disappearing controls remain visually quiet, but they are no longer removed
+from keyboard order or placed inside an `aria-hidden` subtree. Tabbing into the
+control group reveals it through `:focus-within`. Manual randomization trusts
+the engine snapshot, preventing the label from announcing a queued seed as if
+it were already active.
+
+## Acceptance contract
+
+`npm run test:soak` must finish with every assertion true. The current audit
+covers, among other checks:
+
+- 24 hours of transport with no cumulative grid drift and at most 40 sources;
+- all twelve keys, at least eight modes, all meters and all formal stages;
+- phrase-boundary integrity, gradual tempo, common-tone modal transitions,
+  twelve mode grammars, all five cadence types, exact arrivals, and bounded
+  A/A′/B/A″ similarity bands;
+- motif identity, real-onset corpus conditioning, melodic singability,
+  contrary/oblique counterpoint, cadence and resolution quality, roughness and
+  parallel-motion limits;
+- 2,048 independently scored A/A′/B/A″ phrase realizations, each using whole-
+  phrase beam search, with corpus surprisal, motif retention, strong-beat
+  harmony, leap recovery, unique climax, complete planned MIDI, deterministic
+  replay and cross-seed trace-collision gates;
+- non-root bass coverage, pedal/stepwise motion, a seven-semitone bass-leap cap,
+  phrase recurrence, and unstable-triad limits;
+- deterministic independent random domains and all three visual variants;
+- deterministic platform quality plans, an SMAA fallback when MSAA is
+  unavailable, and recovery bounded by the platform ceiling;
+- 512 complete multi-seed emotional journeys with bright/high-tempo coverage;
+- all twenty instruments, idiomatic connection/decay/breath/vibrato plans,
+  sparse/duo/chamber/full/release coverage, phrase-persistent entrances, five
+  accompaniment families, equal-power hand-offs, and fourteen noise/transient
+  recipes;
+- stable shader cells, complete palette/template coverage, zero-gain onset and
+  release scheduling, and smooth transition endpoints.
+
+The browser gate adds real Web Audio and WebGL evidence: running context,
+non-zero output, no limiter overload, no scheduler recovery, no WebGL context
+loss, pulse agreement between audio and renderer, desktop/mobile screenshots,
+and reachable semantic controls. It does not claim loudspeaker, headphone or
+psychoacoustic listener-panel acceptance.
+
+These metrics are regression guardrails, not a claim that a scalar score proves
+beauty. Release-quality comparison still requires loudness-matched, same-seed
+blind A/B listening on melody memorability, harmonic naturalness, rhythmic
+life, form, tension/release, timbre comfort and willingness to keep listening.
+
+## Research basis
+
+- [W3C Web Audio API](https://webaudio.github.io/web-audio-api/) — graph and
+  sample-accurate AudioParam scheduling semantics.
+- [Music Theory Online: parsimonious voice leading](https://mtosmt.org/issues/mto.18.24.4/mto.18.24.4.seress.html)
+  — common-tone and minimal-motion continuity.
+- [Audiokinetic Wwise transition properties](https://www.audiokinetic.com/en/library/edge/?id=setting_source_and_destination_properties&source=Help)
+  — bar, beat, cue and fade-aware interactive transition design.
+- [GPU Gems: Implementing Improved Perlin Noise](https://developer.nvidia.com/gpugems/gpugems2/part-iii-high-quality-rendering/chapter-26-implementing-improved-perlin-noise)
+  and [GPU Gems: Improved Noise](https://developer.nvidia.com/gpugems/gpugems/part-i-natural-effects/chapter-5-implementing-improved-perlin-noise)
+  — coherent gradients and avoiding frequencies above the sampling limit.
+- [Khronos WebGL / ShaderToy presentation](https://www.khronos.org/assets/uploads/developers/library/2017-siggraph/WebGL-BOF-ShaderToy-Aug17.pdf)
+  — portability limits of large floating-point sine hashes.
+- [DDSP](https://research.google/pubs/ddsp-differentiable-digital-signal-processing/)
+  and [MIDI-DDSP](https://research.google/pubs/midi-ddsp-hierarchical-modeling-of-music-for-detailed-control/)
+  — interpretable oscillator, filter, noise and performance hierarchies.
+- [Learning the Long-Term Structure of the Blues](https://research.google/pubs/learning-the-long-term-structure-of-the-blues/)
+  — the gap between locally plausible notes and coherent long-range form.
+- [Music Transformer](https://research.google/pubs/music-transformer-generating-music-with-long-term-structure/)
+  and [MusicVAE](https://proceedings.mlr.press/v80/roberts18a.html) — repetition,
+  relative musical position and hierarchical decoding for long-range identity.
+- [DeepBach](https://proceedings.mlr.press/v70/hadjeres17a.html),
+  [COCONET](https://research.google/pubs/counterpoint-by-convolution/) and
+  [Anticipation-RNN](https://arxiv.org/abs/1709.06404) — positional constraints,
+  non-greedy rewriting and conditioning on future musical anchors.
+- [MeloForm](https://archives.ismir.net/ismir2022/paper/000068.pdf) and
+  [Theme Transformer](https://arxiv.org/abs/2111.04093) — expert form first,
+  learned/local refinement second, with recognisable thematic transformation.
+- [REMI / Pop Music Transformer](https://arxiv.org/abs/2002.00212) — explicit
+  bar, position, tempo and harmony in the event representation.
+- [GrooVAE](https://proceedings.mlr.press/v97/gillick19a.html) — separate
+  quantized composition from correlated performance timing and dynamics.
+- [What is missing in deep music generation?](https://archives.ismir.net/ismir2022/paper/000079.pdf)
+  — multilevel repetition and structure cannot be replaced by collection-level
+  pitch and rhythm statistics.
+- [Measure by Measure](https://transactions.ismir.net/articles/10.5334/tismir.163)
+  — hierarchical symbolic generation and the limits of objective musicality
+  metrics.
+- [Learning Latent Representations of Music to Generate Interactive Musical Palettes](https://research.google/pubs/learning-latent-representations-of-music-to-generate-interactive-musical-palettes/)
+  — continuous, constrained interactive exploration.
+- [TISMIR: perceptual timbre controls](https://transactions.ismir.net/articles/10.5334/tismir.76)
+  — perceptual control dimensions beyond a single spectral-brightness value.
