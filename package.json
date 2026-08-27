@@ -12,8 +12,8 @@
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "test:music": "npm run test:timbre && npm run test:soak",
-    "test:timbre": "node --experimental-strip-types scripts/timbre-audit.mjs",
-    "test:soak": "node --experimental-strip-types scripts/soak-audit.mjs"
+    "test:timbre": "node --experimental-strip-types scripts/music-audit.mjs --timbre",
+    "test:soak": "node --experimental-strip-types scripts/music-audit.mjs --score"
   },
   "dependencies": {
     "@react-three/drei": "10.7.8",
