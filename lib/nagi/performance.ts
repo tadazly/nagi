@@ -23,7 +23,10 @@ export type InstrumentId =
   | 'harp'
   | 'felt-piano'
   | 'pizzicato'
-  | 'marimba';
+  | 'marimba'
+  | 'trumpet'
+  | 'trombone'
+  | 'timpani';
 
 export type TimbreRecipe = {
   attack: number;
@@ -40,9 +43,40 @@ export type TimbreRecipe = {
 export type OrchestrationPlan = {
   accompaniment: InstrumentId;
   bass: InstrumentId;
+  brass: InstrumentId;
   counter: InstrumentId;
   harmony: InstrumentId;
   lead: InstrumentId;
+  percussion: InstrumentId;
+};
+
+/**
+ * Perceptual trims applied after PeriodicWave normalization. Bright, transient
+ * instruments project more strongly than their normalized sample peak implies;
+ * ensemble and low instruments need less or more electrical level to occupy a
+ * comparable orchestral plane.
+ */
+export const INSTRUMENT_OUTPUT_TRIM: Readonly<Record<InstrumentId, number>> = {
+  celesta: 0.86,
+  flute: 0.96,
+  clarinet: 1,
+  violin: 0.82,
+  oboe: 0.84,
+  strings: 0.9,
+  choir: 0.96,
+  'soft-organ': 0.9,
+  'soft-horns': 0.96,
+  cello: 1,
+  contrabass: 1.08,
+  bassoon: 0.94,
+  'soft-bass': 1.08,
+  harp: 0.84,
+  'felt-piano': 0.88,
+  pizzicato: 0.76,
+  marimba: 0.82,
+  trumpet: 0.74,
+  trombone: 0.88,
+  timpani: 0.92,
 };
 
 export type VoiceExpression = {
@@ -73,6 +107,7 @@ export type PhraseRole =
 
 export type InstrumentFamily =
   | 'air'
+  | 'brass'
   | 'bowed'
   | 'keyboard'
   | 'plucked'
@@ -343,6 +378,38 @@ export const INSTRUMENTS: Readonly<Record<InstrumentId, TimbreRecipe>> = {
     vibratoCents: 0.1,
     vibratoHz: 5.0,
   },
+  trumpet: {
+    attack: 0.055,
+    breath: 0.1,
+    brightness: 0.84,
+    label: 'trumpet section',
+    partials: [0, 1, 0.84, 0.62, 0.44, 0.31, 0.21, 0.145, 0.095],
+    release: 0.68,
+    transient: 0.04,
+    vibratoCents: 3.2,
+    vibratoHz: 5.1,
+  },
+  trombone: {
+    attack: 0.085,
+    breath: 0.08,
+    brightness: 0.58,
+    label: 'trombone section',
+    partials: [0, 1, 0.7, 0.46, 0.29, 0.18, 0.11, 0.064, 0.038],
+    release: 0.86,
+    transient: 0.025,
+    vibratoCents: 1.8,
+    vibratoHz: 4.7,
+  },
+  timpani: {
+    attack: 0.012,
+    brightness: 0.24,
+    label: 'timpani',
+    partials: [0, 1, 0.05, 0.31, 0.022, 0.13, 0.011, 0.052, 0.006],
+    release: 1.65,
+    transient: 0.34,
+    vibratoCents: 0,
+    vibratoHz: 4.2,
+  },
 };
 
 type GestureProfileOptions = {
@@ -603,6 +670,40 @@ export const INSTRUMENT_GESTURES: Readonly<
     naturalDecaySeconds: 0.78,
     sustainLevel: 0.08,
   }),
+  trumpet: gestureProfile({
+    boundary: 'breath',
+    depthScale: 0.36,
+    family: 'brass',
+    legatoKind: 'slur',
+    maxContinuousSeconds: 5.8,
+    maxIntervalSemitones: 9,
+    overlapSeconds: 0.012,
+    resetSeconds: 0.18,
+    sustainLevel: 0.78,
+    vibratoMinimumSeconds: 1.1,
+    vibratoOnsetSeconds: 0.46,
+    vibratoRampSeconds: 0.24,
+  }),
+  trombone: gestureProfile({
+    boundary: 'breath',
+    depthScale: 0.22,
+    family: 'brass',
+    legatoKind: 'slur',
+    maxContinuousSeconds: 6.2,
+    maxIntervalSemitones: 7,
+    overlapSeconds: 0.014,
+    resetSeconds: 0.2,
+    sustainLevel: 0.82,
+    vibratoMinimumSeconds: 1.25,
+    vibratoOnsetSeconds: 0.5,
+    vibratoRampSeconds: 0.28,
+  }),
+  timpani: gestureProfile({
+    decayKind: 'natural',
+    family: 'struck',
+    naturalDecaySeconds: 1.8,
+    sustainLevel: 0.04,
+  }),
 };
 
 type Weighted<T> = { value: T; weight: number };
@@ -673,13 +774,20 @@ export function chooseOrchestration(
     { value: 'pizzicato', weight: 0.25 + scene.arousal * 0.92 + brightJoy * 0.38 + continuityWeight('pizzicato', current?.accompaniment) },
     { value: 'marimba', weight: 0.28 + brightJoy * 0.74 + profile.motion * 0.42 + continuityWeight('marimba', current?.accompaniment) },
   ], random);
+  const brass = weightedPick<InstrumentId>([
+    { value: 'soft-horns', weight: 1.05 + tender * 0.55 + continuityWeight('soft-horns', current?.brass) },
+    { value: 'trumpet', weight: 0.32 + brightJoy * 0.48 + intensifying * 0.95 + continuityWeight('trumpet', current?.brass) },
+    { value: 'trombone', weight: 0.36 + dramatic * 0.82 + intensifying * 0.72 + continuityWeight('trombone', current?.brass) },
+  ], random);
 
   const proposal: OrchestrationPlan = {
     accompaniment,
     bass,
+    brass,
     counter,
     harmony,
     lead,
+    percussion: 'timpani',
   };
   if (!current) return proposal;
 
@@ -694,9 +802,11 @@ export function chooseOrchestration(
   const roleWeight: Record<keyof OrchestrationPlan, number> = {
     accompaniment: stage.id === 'release' ? 1.1 : 0.8,
     bass: stage.id === 'intensification' ? 1.05 : 0.52,
+    brass: stage.id === 'intensification' ? 1.45 : 0.58,
     counter: stage.id === 'development' ? 1.18 : 0.82,
     harmony: stage.id === 'intensification' ? 1.3 : 0.7,
     lead: stage.id === 'return' ? 0.72 : 1,
+    percussion: 0.2,
   };
   const selected = new Set<keyof OrchestrationPlan>();
   const remaining = [...changed];
@@ -761,7 +871,7 @@ export function choosePerformancePlan(
         : 0;
   const phraseConnection = clamp(
     1.04 - scene.arousal * 0.43 + (1 - scene.valence) * 0.1 - scene.tension * 0.07 - stageEnergy,
-    0.48,
+    0.64,
     1.08,
   );
   const dynamic = clamp(0.82 + scene.arousal * 0.24 + stageEnergy, 0.76, 1.12);

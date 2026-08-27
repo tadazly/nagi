@@ -157,7 +157,15 @@ export const createMotif = (
   const meter = context.meterIndex === undefined
     ? null
     : METERS[context.meterIndex] ?? null;
-  const learnedOnsets = learnedRhythm?.reduce<number[]>(
+  // The corpus model stores durations in quarter-note beats. Runtime 6/8 uses
+  // two dotted-quarter transport beats per bar, so convert units before metric
+  // conditioning and scheduling instead of stretching every learned IOI 50%.
+  const quarterNotesPerTransportBeat = meter?.id === 'compound' ? 1.5 : 1;
+  const minimumRhythmBeat = meter?.id === 'compound' ? 1 / 3 : 0.5;
+  const transportLearnedRhythm = learnedRhythm?.map((beat) =>
+    clamp(beat / quarterNotesPerTransportBeat, minimumRhythmBeat, 2.5)
+  );
+  const learnedOnsets = transportLearnedRhythm?.reduce<number[]>(
     (onsets, duration, index) => {
       if (index + 1 < motifLength) {
         onsets.push(
@@ -198,12 +206,13 @@ export const createMotif = (
         .slice(0, contour.length)
         .map((beat) =>
           clamp(
-            beat * (1.16 - arousal * 0.22) * random.between(0.9, 1.12),
-            0.5,
+            beat / quarterNotesPerTransportBeat *
+              (1.16 - arousal * 0.22) * random.between(0.9, 1.12),
+            minimumRhythmBeat,
             2.5,
           ),
         )
-    : learnedRhythm!;
+    : transportLearnedRhythm!;
   return {
     anchorDegree: random.pick([0, 0, 2, 4, 5] as const),
     contour,
@@ -302,11 +311,22 @@ export const planMotifPhrase = (
       Math.sin((phrasePosition * 2 + motif.cycle * 0.17) * Math.PI) * rubatoDepth;
     const humanizeBeats =
       correlatedRubato + random.between(-0.0035, 0.0035) * (1 - metricStrength);
-    const articulation = clamp(
-      0.58 + scene.valence * 0.18 + (1 - scene.arousal) * 0.17 + random.between(-0.04, 0.04),
-      0.5,
-      0.94,
-    );
+    // Rhythm describes the notated line; instrument-specific articulation is
+    // applied later by the performance layer. Keeping the notated gate close
+    // to the next onset prevents the two layers from shortening every note
+    // twice, which made otherwise singable motifs sound like isolated drills.
+    const articulation = role === 'lead'
+      ? clamp(
+          0.91 + scene.valence * 0.035 + (1 - scene.arousal) * 0.025 +
+            random.between(-0.018, 0.012),
+          0.88,
+          0.985,
+        )
+      : clamp(
+          0.76 + (1 - scene.arousal) * 0.07 + random.between(-0.025, 0.025),
+          0.72,
+          0.88,
+        );
     const contour = motif.contour[motifIndex % motif.contour.length];
     let motifDegree =
       motif.anchorDegree + motif.sequenceDegree + motif.direction * contour;
@@ -356,8 +376,12 @@ export const planMotifPhrase = (
       motif.cursor = 0;
       evolveMotif(motif, random);
       const breath = role === 'lead'
-        ? random.between(0.45, 1.15 + (1 - scene.arousal) * 1.1)
-        : random.between(1.2, 2.4 + (1 - scene.arousal) * 1.2);
+        ? random.pick(
+            scene.arousal < 0.38
+              ? [0.5, 0.75, 1, 1.25] as const
+              : [0.25, 0.5, 0.5, 0.75] as const,
+          )
+        : random.pick([1, 1.5, 2, 2.5] as const);
       beat += quantizeDuration(breath, meter.subdivisionsPerBeat);
     }
   }

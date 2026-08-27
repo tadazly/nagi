@@ -257,6 +257,53 @@ const metricName = (strength: number) => {
   return 'offbeat';
 };
 
+const weightedSurprisal = (
+  rows: readonly WeightedValue[] | undefined,
+  value: number,
+) => {
+  if (!rows || rows.length === 0) return 4.2;
+  const total = rows.reduce((sum, [, count]) => sum + count, 0);
+  const observed = rows.find(([candidate]) => Number(candidate) === value)?.[1] ?? 0;
+  // A small symmetric prior keeps unseen transitions possible while making
+  // their cost explicit. Returning information content (rather than another
+  // random sample) lets the phrase planner compare complete candidate paths.
+  const smoothing = 0.5;
+  const vocabulary = Math.max(12, rows.length + 3);
+  return Math.min(
+    7,
+    -Math.log((observed + smoothing) / (total + smoothing * vocabulary)),
+  );
+};
+
+/** Corpus information cost for the first diatonic motion in a phrase. */
+export const classicalInitialIntervalSurprisal = (
+  interval: number,
+  mode: 'major' | 'minor',
+) => weightedSurprisal(
+  model.initialIntervals[mode] ?? model.initialIntervals.major,
+  interval,
+);
+
+/**
+ * Corpus information cost for a diatonic interval conditioned on the two
+ * previous intervals and its real metric position. This exposes the trained
+ * prior to look-ahead decoding instead of limiting it to note-by-note draws.
+ */
+export const classicalIntervalTransitionSurprisal = (
+  previousTwo: number,
+  previousOne: number,
+  interval: number,
+  mode: 'major' | 'minor',
+  metricStrength: number,
+) => {
+  const context = `${previousTwo},${previousOne}`;
+  const view = `${mode}|${metricName(metricStrength)}|${context}`;
+  return weightedSurprisal(
+    model.intervalViews[view] ?? model.intervalTransitions[context],
+    interval,
+  );
+};
+
 export const classicalChordToneProbability = (
   mode: 'major' | 'minor',
   metricStrength: number,

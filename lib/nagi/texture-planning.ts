@@ -92,6 +92,7 @@ export type PhraseTexturePlanningOptions = {
   minimumSegmentBars?: number;
   phraseBars?: number;
   previousAccompanimentPattern?: AccompanimentPattern | null;
+  previousTexturePlan?: PhraseTexturePlan | null;
 };
 
 const STATE_ROLE_RANGE: Readonly<Record<TextureState, readonly [number, number]>> = {
@@ -106,8 +107,54 @@ const STATE_CHORD_RANGE: Readonly<Record<TextureState, readonly [number, number]
   sparse: [0, 1],
   duo: [1, 2],
   chamber: [2, 4],
-  full: [5, 6],
+  full: [4, 5],
   release: [0, 2],
+};
+
+const bridgePhraseBoundary = (
+  segments: readonly PhraseTextureSegment[],
+  previous: PhraseTexturePlan | null | undefined,
+  continuousRoles: PhraseTexturePlan['continuousRoles'],
+  density: number,
+  random: SeededRandom,
+) => {
+  const first = segments[0];
+  const previousLast = previous?.segments.at(-1);
+  if (!first || !previousLast) return [...segments];
+  if (first.activeRoles.some((role) => previousLast.activeRoles.includes(role))) {
+    return [...segments];
+  }
+
+  const bridgeRole = (['harmony', 'lead', 'bass', 'accompaniment', 'counter'] as const)
+    .find((role) => previousLast.activeRoles.includes(role));
+  if (!bridgeRole) return [...segments];
+
+  const [, maximum] = STATE_ROLE_RANGE[first.state];
+  const activeRoles = [...first.activeRoles];
+  if (activeRoles.length >= maximum) {
+    const removableIndex = activeRoles.findLastIndex((role) =>
+      !continuousRoles.includes(
+        role as Extract<TextureRole, 'counter' | 'accompaniment'>,
+      )
+    );
+    activeRoles.splice(removableIndex >= 0 ? removableIndex : activeRoles.length - 1, 1);
+  }
+  activeRoles.push(bridgeRole);
+  const connectedRoles = uniqueRoles(activeRoles);
+  const connectedFirst: PhraseTextureSegment = {
+    ...first,
+    activeRoles: connectedRoles,
+    spotlight: connectedRoles.includes(first.spotlight)
+      ? first.spotlight
+      : bridgeRole,
+    totalChordVoices: chordVoiceTarget(
+      first.state,
+      connectedRoles,
+      density,
+      random,
+    ),
+  };
+  return [connectedFirst, ...segments.slice(1)];
 };
 
 const STAGE_STATES: Readonly<
@@ -477,7 +524,7 @@ export const planPhraseTexture = (
       (stage.id === 'intensification' ? 0.18 : 0) -
       (stage.id === 'release' ? 0.2 : 0),
   );
-  const segments = spans.map((span, index): PhraseTextureSegment => {
+  const generatedSegments = spans.map((span, index): PhraseTextureSegment => {
     const state = segmentState(stage.id, index, spans.length);
     const activeRoles = rolesForState(state, continuousRoles, density, random);
     const endBar = span.startBar + span.spanBars;
@@ -496,6 +543,13 @@ export const planPhraseTexture = (
       totalChordVoices: chordVoiceTarget(state, activeRoles, density, random),
     };
   });
+  const segments = bridgePhraseBoundary(
+    generatedSegments,
+    options.previousTexturePlan,
+    continuousRoles,
+    density,
+    random,
+  );
 
   return {
     accompanimentPattern: planAccompanimentPattern(

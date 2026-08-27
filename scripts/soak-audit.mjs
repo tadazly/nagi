@@ -12,7 +12,7 @@ import {
   chooseHarmonyVoiceCount,
   chooseNeighborScene,
   clamp,
-  degreeTension,
+  degreeTensionForScene,
   degreeTriadComfort,
   deriveSeedNumber,
   emotionalFormFromSeed,
@@ -43,6 +43,7 @@ import {
   smootherstep,
   tempoFromArousal,
   voiceLeadChord,
+  voiceLeadingTargets,
   visualVariantFromSeed,
 } from '../lib/nagi/generative.ts';
 import {
@@ -62,6 +63,7 @@ import {
 } from '../lib/nagi/classical-prior.ts';
 import {
   INSTRUMENT_GESTURES,
+  INSTRUMENT_OUTPUT_TRIM,
   INSTRUMENTS,
   articulationName,
   chooseOrchestration,
@@ -175,6 +177,8 @@ let previousVoicing = [];
 let harmonicVoiceCount = 3;
 let leadMidi = 69;
 let counterMidi = 62;
+let leadPreviousInterval = 0;
+let counterPreviousInterval = 0;
 let leadNeedsResolution = false;
 let counterNeedsResolution = false;
 const motifPair = createMotifPair(melodyRandom, scene);
@@ -185,10 +189,15 @@ let bassLinePlan;
 let lastBassMidi = 46;
 let totalVoiceMovement = 0;
 let voiceMovementSamples = 0;
+let maximumAlignedVoiceMovement = 0;
 let totalLeadMovement = 0;
 let leadSamples = 0;
 let totalCounterMovement = 0;
 let counterSamples = 0;
+let maximumLeadLeap = 0;
+let consecutiveLargeLeadLeaps = 0;
+let leadLeapRecoveryOpportunities = 0;
+let leadLeapRecoveries = 0;
 let resolutionAttempts = 0;
 let successfulResolutions = 0;
 let strongBeatNotes = 0;
@@ -360,9 +369,18 @@ while (now < END_SECONDS) {
   );
   harmonyVoiceCounts.add(voicing.length);
   if (previousVoicing.length > 0) {
-    for (const note of voicing) {
-      totalVoiceMovement += Math.min(...previousVoicing.map((old) => Math.abs(note - old)));
+    const continuityTargets = voiceLeadingTargets(previousVoicing, voicing.length);
+    const continuityIndices = previousVoicing.length === voicing.length
+      ? voicing.map((_, voiceIndex) => voiceIndex)
+      : previousVoicing.length > 1 && voicing.length > 1
+        ? [0, voicing.length - 1]
+        : [0];
+    for (const voiceIndex of continuityIndices) {
+      const note = voicing[voiceIndex];
+      const movement = Math.abs(note - (continuityTargets[voiceIndex] ?? note));
+      totalVoiceMovement += movement;
       voiceMovementSamples += 1;
+      maximumAlignedVoiceMovement = Math.max(maximumAlignedVoiceMovement, movement);
     }
     if (previousVoicing.length === voicing.length) {
       for (let low = 0; low < voicing.length; low += 1) {
@@ -421,7 +439,7 @@ while (now < END_SECONDS) {
   if (chordPitchClasses(sceneForChord, chordDegree).length === 3) triadChords += 1;
   if (degreeTriadComfort(sceneForChord, chordDegree) < 0.5) unstableTriadChords += 1;
   if (darkModes.has(MODES[sceneForChord.modeIndex].id)) darkModeChords += 1;
-  if (degreeTension(chordDegree) > 0.6) {
+  if (degreeTensionForScene(sceneForChord, chordDegree) > 0.6) {
     highTensionChords += 1;
     highTensionBars += spanBars;
   }
@@ -508,6 +526,9 @@ while (now < END_SECONDS) {
       );
       const direction = contour > 0.16 ? 1 : contour < -0.16 ? -1 : 0;
       const previous = role === 'lead' ? leadMidi : counterMidi;
+      const previousInterval = role === 'lead'
+        ? leadPreviousInterval
+        : counterPreviousInterval;
       const needsResolution = role === 'lead' ? leadNeedsResolution : counterNeedsResolution;
       const targetMidi =
         (role === 'lead' ? 70 : 62) + contour * (role === 'lead' ? 4.2 : 3.1);
@@ -517,9 +538,11 @@ while (now < END_SECONDS) {
         backgroundNotes,
         bassMidi: bass,
         direction,
+        maximumInterval: needsResolution ? 2 : 7,
         metricStrength: event.metricStrength,
         mustResolve: needsResolution || event.cadential,
         otherVoiceMidi: role === 'lead' ? counterMidi : leadMidi,
+        previousInterval,
         registerHigh: role === 'lead' ? 84 : 74,
         registerLow: role === 'lead' ? 60 : 52,
         targetMidi,
@@ -543,14 +566,29 @@ while (now < END_SECONDS) {
         if (chordTone) strongBeatChordTones += 1;
       }
       if (role === 'lead') {
-        totalLeadMovement += Math.abs(midi - leadMidi);
+        const interval = midi - leadMidi;
+        const movement = Math.abs(interval);
+        totalLeadMovement += movement;
         leadSamples += 1;
+        maximumLeadLeap = Math.max(maximumLeadLeap, movement);
+        if (Math.abs(leadPreviousInterval) >= 5) {
+          leadLeapRecoveryOpportunities += 1;
+          if (
+            interval !== 0 &&
+            Math.sign(interval) === -Math.sign(leadPreviousInterval) &&
+            movement <= 2
+          ) leadLeapRecoveries += 1;
+          if (movement >= 5) consecutiveLargeLeadLeaps += 1;
+        }
+        leadPreviousInterval = interval;
         leadMidi = midi;
         leadNeedsResolution = !chordTone;
         intervals.push([now + event.beat * beatSeconds, now + event.beat * beatSeconds + 3.4]);
       } else {
-        totalCounterMovement += Math.abs(midi - counterMidi);
+        const interval = midi - counterMidi;
+        totalCounterMovement += Math.abs(interval);
         counterSamples += 1;
+        counterPreviousInterval = interval;
         counterMidi = midi;
         counterNeedsResolution = !chordTone;
         intervals.push([now + event.beat * beatSeconds, now + event.beat * beatSeconds + 4.7]);
@@ -591,6 +629,8 @@ for (const [, change] of sweep) {
 const averageVoiceMovement = totalVoiceMovement / Math.max(1, voiceMovementSamples);
 const averageLeadMovement = totalLeadMovement / Math.max(1, leadSamples);
 const averageCounterMovement = totalCounterMovement / Math.max(1, counterSamples);
+const leadLeapRecoveryRate = leadLeapRecoveries /
+  Math.max(1, leadLeapRecoveryOpportunities);
 const progressionUniqueness = progressionWindows.size / Math.max(1, chordCount - 5);
 const resolutionRate = successfulResolutions / Math.max(1, resolutionAttempts);
 const strongBeatConsonance = strongBeatChordTones / Math.max(1, strongBeatNotes);
@@ -675,6 +715,8 @@ let textureRoleFlickerViolations = 0;
 let textureMinimumDurationViolations = 0;
 let textureSilentSegments = 0;
 let textureInactiveSpotlights = 0;
+let textureBoundarySamples = 0;
+let textureDisconnectedBoundaries = 0;
 let maxPlannedAccompanimentGridError = 0;
 let phraseClimaxFailures = 0;
 let phraseCadenceFailures = 0;
@@ -689,6 +731,22 @@ let phraseSliceFieldFailures = 0;
 let aPrimeExactMelodyCopies = 0;
 let aDoublePrimeExactMelodyCopies = 0;
 let melodicReferenceSamples = 0;
+let melodicConnectionRatioTotal = 0;
+let melodicConnectionRatioSamples = 0;
+let beamCandidatePaths = 0;
+let beamClimaxProminence = 0;
+let beamCorpusSurprisal = 0;
+let beamLeapRecoveryRate = 0;
+let beamMotifPitchClassRate = 0;
+let beamQualityScore = 0;
+let beamStrongBeatChordToneRate = 0;
+let beamQualitySamples = 0;
+let maximumBeamRepeatedNotes = 0;
+let minimumBeamClimaxProminence = Infinity;
+let missingPlannedMidiEvents = 0;
+let phraseTraceCollisions = 0;
+let phraseTraceDeterminismFailures = 0;
+const phraseTraces = new Set();
 let reconciliationTemplate = null;
 
 const emotionDistance = (left, right) => Math.hypot(
@@ -746,6 +804,18 @@ const independentlyMeasuredHarmonicSimilarity = (
 const melodicSignature = (plan) => plan.leadEvents
   .map((event) => `${event.phraseBeat}:${event.motifDegree}:${event.durationBeats}`)
   .join('|');
+const realizedPhraseTrace = (plan) => JSON.stringify({
+  counter: plan.counterEvents.map((event) => [
+    event.phraseBeat,
+    event.durationBeats,
+    event.plannedMidi,
+  ]),
+  lead: plan.leadEvents.map((event) => [
+    event.phraseBeat,
+    event.durationBeats,
+    event.plannedMidi,
+  ]),
+});
 const preservedSliceFields = [
   'accentedDissonanceAllowed',
   'harmonicIntent',
@@ -753,6 +823,7 @@ const preservedSliceFields = [
   'phraseBeat',
   'phrasePosition',
   'phraseRole',
+  'plannedMidi',
   'targetMidi',
 ];
 
@@ -857,6 +928,7 @@ for (let index = 0; index < 512; index += 1) {
 
   const sampleProfile = profileFromSeed(seed);
   let previousPattern = null;
+  let previousTexturePlan = null;
   for (const stage of form.stages) {
     const stageScene = scenesByStage[stage.id];
     const harmonyPlan = stage.id === 'statement'
@@ -879,8 +951,18 @@ for (let index = 0; index < 512; index += 1) {
         harmonyEvents: harmonyPlan.events,
         phraseBars: harmonyPlan.phraseBars,
         previousAccompanimentPattern: previousPattern,
+        previousTexturePlan,
       },
     );
+    if (previousTexturePlan) {
+      textureBoundarySamples += 1;
+      const previousRoles = previousTexturePlan.segments.at(-1)?.activeRoles ?? [];
+      const nextRoles = texturePlan.segments[0]?.activeRoles ?? [];
+      if (!nextRoles.some((role) => previousRoles.includes(role))) {
+        textureDisconnectedBoundaries += 1;
+      }
+    }
+    previousTexturePlan = texturePlan;
     previousPattern = texturePlan.accompanimentPattern;
     accompanimentPatternsVisited.add(texturePlan.accompanimentPattern.id);
     accompanimentContinuityVisited.add(texturePlan.accompanimentPattern.continuity);
@@ -988,6 +1070,51 @@ for (let index = 0; index < 512; index += 1) {
       previousPhrase: bMelody,
     },
   );
+  for (const melodyPlan of [aMelody, aPrimeMelody, bMelody, aDoublePrimeMelody]) {
+    const quality = melodyPlan.realization.quality;
+    beamCandidatePaths += melodyPlan.realization.candidatePathsEvaluated;
+    beamClimaxProminence += quality.climaxProminence;
+    beamCorpusSurprisal += quality.corpusSurprisal;
+    beamLeapRecoveryRate += quality.leapRecoveryRate;
+    beamMotifPitchClassRate += quality.motifPitchClassRate;
+    beamQualityScore += quality.score;
+    beamStrongBeatChordToneRate += quality.strongBeatChordToneRate;
+    beamQualitySamples += 1;
+    maximumBeamRepeatedNotes = Math.max(
+      maximumBeamRepeatedNotes,
+      quality.maximumRepeatedNotes,
+    );
+    minimumBeamClimaxProminence = Math.min(
+      minimumBeamClimaxProminence,
+      quality.climaxProminence,
+    );
+    missingPlannedMidiEvents += [...melodyPlan.leadEvents, ...melodyPlan.counterEvents]
+      .filter((event) => event.plannedMidi === undefined).length;
+  }
+  const phraseTrace = realizedPhraseTrace(aMelody);
+  phraseTraceCollisions += Number(phraseTraces.has(phraseTrace));
+  phraseTraces.add(phraseTrace);
+  const deterministicPhrase = () => {
+    const deterministicRandom = rootRandom.fork('phrase-realization-determinism');
+    const deterministicMotifs = createMotifPair(deterministicRandom, openingScene);
+    return planPhraseMelody(
+      openingScene,
+      deterministicRandom,
+      deterministicMotifs.lead,
+      deterministicMotifs.counter,
+      {
+        counterEnabled: true,
+        formRole: 'A',
+        harmonyPlan: aHarmony,
+        previousCounterMidi: 62,
+        previousLeadMidi: 69,
+      },
+    );
+  };
+  phraseTraceDeterminismFailures += Number(
+    realizedPhraseTrace(deterministicPhrase()) !==
+      realizedPhraseTrace(deterministicPhrase()),
+  );
   melodicVariationSources['A-prime'].add(aPrimeMelody.variation.source);
   melodicVariationSources['A-double-prime'].add(aDoublePrimeMelody.variation.source);
   aPrimeMelody.variation.techniques.forEach((technique) => (
@@ -1094,6 +1221,14 @@ for (let index = 0; index < 512; index += 1) {
       finalEvent.targetMidi > melodyPlan.registerArc.climaxMidi - 3
     ) phraseCadenceFailures += 1;
     melodyPlan.leadEvents.forEach((event, eventIndex, events) => {
+      const nextEvent = events[eventIndex + 1];
+      if (nextEvent) {
+        melodicConnectionRatioTotal += Math.min(
+          1,
+          event.durationBeats / Math.max(0.001, nextEvent.phraseBeat - event.phraseBeat),
+        );
+        melodicConnectionRatioSamples += 1;
+      }
       if (!event.accentedDissonanceAllowed) return;
       controlledAccentedDissonances += 1;
       if (!event.mustResolveNext || eventIndex >= events.length - 1) {
@@ -1157,12 +1292,26 @@ const averageDevelopmentEmotionDistance = developmentEmotionDistanceTotal /
 const aPrimeExactMelodyShare = aPrimeExactMelodyCopies / melodicReferenceSamples;
 const aDoublePrimeExactMelodyShare = aDoublePrimeExactMelodyCopies /
   melodicReferenceSamples;
+const averageMelodicConnectionRatio = melodicConnectionRatioTotal /
+  Math.max(1, melodicConnectionRatioSamples);
 const conservativeStrongBeatChordToneRate = conservativeStrongBeatChordTones /
   Math.max(1, realizedAccentedDissonanceSamples);
 const realizedAccentedDissonanceRate = realizedAccentedDissonanceChoices /
   Math.max(1, realizedAccentedDissonanceSamples);
 const realizedDissonanceResolutionRate = realizedDissonanceResolutions /
   Math.max(1, realizedAccentedDissonanceChoices);
+const averageBeamCandidatePaths = beamCandidatePaths / Math.max(1, beamQualitySamples);
+const averageBeamClimaxProminence = beamClimaxProminence /
+  Math.max(1, beamQualitySamples);
+const averageBeamCorpusSurprisal = beamCorpusSurprisal /
+  Math.max(1, beamQualitySamples);
+const averageBeamLeapRecoveryRate = beamLeapRecoveryRate /
+  Math.max(1, beamQualitySamples);
+const averageBeamMotifPitchClassRate = beamMotifPitchClassRate /
+  Math.max(1, beamQualitySamples);
+const averageBeamQualityScore = beamQualityScore / Math.max(1, beamQualitySamples);
+const averageBeamStrongBeatChordToneRate = beamStrongBeatChordToneRate /
+  Math.max(1, beamQualitySamples);
 
 const modeGrammarAudit = [];
 const modeCadenceNames = new Set();
@@ -1312,7 +1461,15 @@ if (reconciliationTemplate) {
 // different questions and guard one another against accidental simplification.
 const INTEGRATED_HOURS = 24;
 const INTEGRATED_END_SECONDS = INTEGRATED_HOURS * 60 * 60;
-const INTEGRATED_ROLES = ['lead', 'counter', 'harmony', 'bass', 'accompaniment'];
+const INTEGRATED_ROLES = [
+  'lead',
+  'counter',
+  'harmony',
+  'bass',
+  'brass',
+  'percussion',
+  'accompaniment',
+];
 const INTEGRATED_STAGES = ['statement', 'development', 'intensification', 'release', 'return'];
 const INTEGRATED_TEXTURE_STATES = ['sparse', 'duo', 'chamber', 'full', 'release'];
 const integratedRoleStats = Object.fromEntries(INTEGRATED_ROLES.map((role) => [role, {
@@ -1400,12 +1557,10 @@ const scheduleIntegratedLogicalVoice = ({
   const dominant = mix < 0.5 ? fromInstrument : toInstrument;
   const dualRequested = fromInstrument !== toInstrument && mix > 0.04 && mix < 0.96;
   const roleLimit = role === 'harmony'
-    ? 32
-    : role === 'bass'
-      ? 34
-      : role === 'accompaniment'
-        ? 36
-        : 40;
+    ? 34
+    : role === 'accompaniment'
+      ? 36
+      : 40;
   let instruments = [];
   let degraded = false;
   if (
@@ -1577,6 +1732,7 @@ let integratedPreviousHarmonyPlan;
 let integratedOpeningMelodyPlan;
 let integratedPreviousMelodyPlan;
 let integratedPreviousPattern;
+let integratedPreviousTexturePlan = null;
 let integratedHarmonyRandom;
 let integratedMelodyRandom;
 let integratedArrangementRandom;
@@ -1590,6 +1746,8 @@ let integratedCurrentVoicing = [];
 let integratedLastBassMidi = 46;
 let integratedLastLeadMidi = 69;
 let integratedLastCounterMidi = 62;
+let integratedLastLeadInterval = 0;
+let integratedLastCounterInterval = 0;
 let integratedLeadNeedsResolution = false;
 let integratedCounterNeedsResolution = false;
 let integratedLeadResolutionDirection = 0;
@@ -1690,9 +1848,11 @@ const planIntegratedPhrase = () => {
       harmonyEvents: harmonyPlan.events,
       phraseBars: harmonyPlan.phraseBars,
       previousAccompanimentPattern: integratedPreviousPattern,
+      previousTexturePlan: integratedPreviousTexturePlan,
     },
   );
   integratedPreviousPattern = texturePlan.accompanimentPattern;
+  integratedPreviousTexturePlan = texturePlan;
   integratedPatternsVisited.add(texturePlan.accompanimentPattern.id);
   const counterSegments = texturePlan.segments.filter((segment) =>
     segment.activeRoles.includes('counter')
@@ -1703,6 +1863,7 @@ const planIntegratedPhrase = () => {
     integratedLeadMotif,
     integratedCounterMotif,
     {
+      bassLinePlan: bassPlan,
       counterEnabled: counterSegments.length > 0,
       counterEntryBar: counterSegments[0]?.startBar,
       counterExitBar: counterSegments.length > 0
@@ -1711,6 +1872,7 @@ const planIntegratedPhrase = () => {
       formRole,
       harmonyPlan,
       openingReference: integratedOpeningMelodyPlan ?? undefined,
+      previousCounterMidi: integratedLastCounterMidi,
       previousLeadMidi: integratedLastLeadMidi,
       previousPhrase: integratedPreviousMelodyPlan ?? undefined,
     },
@@ -1789,6 +1951,24 @@ while (integratedNow < INTEGRATED_END_SECONDS) {
   const bassActive = activeRoles.includes('bass');
   const harmonyActive = activeRoles.includes('harmony');
   const accompanimentActive = activeRoles.includes('accompaniment');
+  const brassActive = harmonyActive && (
+    textureSegment?.state === 'full' ||
+    (
+      stage.id === 'intensification' &&
+      harmonyEvent.tensionTarget >= 0.52
+    ) ||
+    (
+      harmonyEvent.cadential &&
+      integratedScene.arousal >= 0.64 &&
+      integratedScene.tension >= 0.42
+    )
+  );
+  const percussionActive = (
+    textureSegment?.state === 'full' ||
+    stage.id === 'intensification'
+  ) && (
+    harmonyEvent.cadential || harmonyEvent.tensionTarget >= 0.68
+  );
   const upperHarmonyVoiceCount = harmonyActive
     ? Math.max(1, (textureSegment?.totalChordVoices ?? 3) - (bassActive ? 1 : 0))
     : 0;
@@ -1841,6 +2021,8 @@ while (integratedNow < INTEGRATED_END_SECONDS) {
   let localCounterNeedsResolution = integratedCounterNeedsResolution;
   let localLeadResolutionDirection = integratedLeadResolutionDirection;
   let localLeadResolutionMaximumStep = integratedLeadResolutionMaximumStep;
+  let localLeadInterval = integratedLastLeadInterval;
+  let localCounterInterval = integratedLastCounterInterval;
   const phraseEndsWithChord = integratedPhraseBar + spanBars >= integratedScene.phraseBars;
   const pendingMelody = [];
   for (const item of melodicTimeline) {
@@ -1865,7 +2047,9 @@ while (integratedNow < INTEGRATED_END_SECONDS) {
     const targetPitchClass = item.event.retainPreviousPitch
       ? integratedPitchClass(previousMidi)
       : motifPitchClass(integratedScene, item.event.motifDegree);
-    const midi = pickMelodyMidi(
+    const phraseOpening = item.role === 'lead' &&
+      item.event.phraseBeat === melodyPlan.leadEvents[0]?.phraseBeat;
+    const midi = item.event.plannedMidi ?? pickMelodyMidi(
       integratedScene,
       integratedChordDegree,
       previousMidi,
@@ -1880,7 +2064,9 @@ while (integratedNow < INTEGRATED_END_SECONDS) {
         direction,
         maximumInterval: item.role === 'lead' && unresolved
           ? localLeadResolutionMaximumStep || 2
-          : undefined,
+          : phraseOpening
+            ? 5
+            : 7,
         metricStrength: item.event.metricStrength,
         mustResolve: unresolved || cadenceArrival,
         otherVoiceMidi: item.role === 'counter'
@@ -1888,6 +2074,9 @@ while (integratedNow < INTEGRATED_END_SECONDS) {
           : slicedCounter.length > 0
             ? localCounterMidi
             : undefined,
+        previousInterval: item.role === 'lead'
+          ? localLeadInterval
+          : localCounterInterval,
         registerHigh: item.role === 'lead'
           ? melodyPlan.registerArc.leadHighMidi
           : melodyPlan.registerArc.counterHighMidi,
@@ -1901,6 +2090,7 @@ while (integratedNow < INTEGRATED_END_SECONDS) {
     );
     const chordTone = isChordTone(integratedScene, integratedChordDegree, midi);
     if (item.role === 'lead') {
+      localLeadInterval = midi - previousMidi;
       localLeadMidi = midi;
       localLeadNeedsResolution = !chordTone || item.event.mustResolveNext;
       if (item.event.mustResolveNext) {
@@ -1911,10 +2101,17 @@ while (integratedNow < INTEGRATED_END_SECONDS) {
         localLeadResolutionMaximumStep = 0;
       }
     } else {
+      localCounterInterval = midi - previousMidi;
       localCounterMidi = midi;
       localCounterNeedsResolution = !chordTone || item.event.mustResolveNext;
     }
     pendingMelody.push({ ...item, midi });
+  }
+  if (pendingMelody.some((item) => item.role === 'lead')) {
+    integratedLastLeadInterval = localLeadInterval;
+  }
+  if (pendingMelody.some((item) => item.role === 'counter')) {
+    integratedLastCounterInterval = localCounterInterval;
   }
   const realizedLead = pendingMelody
     .filter((item) => item.role === 'lead')
@@ -2024,6 +2221,50 @@ while (integratedNow < INTEGRATED_END_SECONDS) {
     integratedLastBassMidi = bassMidi;
   }
 
+  if (brassActive) {
+    const upperVoicing = integratedCurrentVoicing.slice(1);
+    const brassVoiceCount = textureSegment?.state === 'full' && harmonyEvent.cadential
+      ? 2
+      : 1;
+    upperVoicing.slice(-brassVoiceCount).forEach((midi) => {
+      const registerMidi = toPlan.brass === 'trombone' && midi > 67
+        ? midi - 12
+        : toPlan.brass === 'trumpet' && midi < 60
+          ? midi + 12
+          : midi;
+      const maximumRelease = Math.max(
+        INSTRUMENTS[fromPlan.brass].release,
+        INSTRUMENTS[toPlan.brass].release,
+      );
+      scheduleIntegratedLogicalVoice({
+        end: chordStart + Math.min(duration * 0.88, meter.beatsPerBar * beatSeconds * 1.5) +
+          Math.min(1.45, maximumRelease) + 0.025,
+        fromInstrument: fromPlan.brass,
+        mix,
+        role: 'brass',
+        start: chordStart - 0.008,
+        toInstrument: toPlan.brass,
+        voiceId: `brass:${integratedVoiceSerial++}:${registerMidi}`,
+      });
+    });
+  }
+
+  if (percussionActive) {
+    const percussionBars = harmonyEvent.cadential ? Math.min(2, spanBars) : 1;
+    for (let bar = 0; bar < percussionBars; bar += 1) {
+      const eventStart = chordStart + bar * meter.beatsPerBar * beatSeconds;
+      scheduleIntegratedLogicalVoice({
+        end: eventStart + 1.15 + integratedProfile.space * 0.55 + 0.025,
+        fromInstrument: fromPlan.percussion,
+        mix,
+        role: 'percussion',
+        start: eventStart - 0.008,
+        toInstrument: toPlan.percussion,
+        voiceId: `percussion:${integratedVoiceSerial++}`,
+      });
+    }
+  }
+
   if (accompanimentActive && integratedCurrentVoicing.length >= 2) {
     const accompanimentEvents = accompanimentEventsForSpan(
       texturePlan.accompanimentPattern,
@@ -2096,6 +2337,10 @@ const orchestrationCoverage = {
   counter: new Set(),
   harmony: new Set(),
   lead: new Set(),
+};
+const orchestralSectionCoverage = {
+  brass: new Set(),
+  percussion: new Set(),
 };
 const articulationCoverage = new Set();
 const initialEmotionCoverage = new Set();
@@ -2195,6 +2440,8 @@ for (let index = 0; index < 2048; index += 1) {
     previousOrchestration,
   );
   const performance = choosePerformancePlan(sampleScene, stage, sampleRandom);
+  orchestralSectionCoverage.brass.add(orchestration.brass);
+  orchestralSectionCoverage.percussion.add(orchestration.percussion);
   for (const role of Object.keys(orchestrationCoverage)) {
     orchestrationCoverage[role].add(orchestration[role]);
     articulationCoverage.add(`${role}:${articulationName(performance[role])}`);
@@ -2419,6 +2666,15 @@ const engineUsesEqualPowerTimbreHandoffs =
   audioEngineSource.includes('Math.cos(mix * Math.PI * 0.5)') &&
   audioEngineSource.includes('Math.sin(mix * Math.PI * 0.5)') &&
   (audioEngineSource.match(/this\.getToneLayers\(/g) ?? []).length >= 4;
+const instrumentOutputTrims = Object.values(INSTRUMENT_OUTPUT_TRIM);
+const orchestralGainStagingIsExplicit =
+  Object.keys(INSTRUMENT_OUTPUT_TRIM).length === Object.keys(INSTRUMENTS).length &&
+  Math.min(...instrumentOutputTrims) >= 0.7 &&
+  Math.max(...instrumentOutputTrims) <= 1.12 &&
+  audioEngineSource.includes('Math.sqrt(2 / upperVoiceCount)') &&
+  audioEngineSource.includes("role === 'counter'") &&
+  audioEngineSource.includes("role === 'accompaniment'") &&
+  audioEngineSource.includes('if (index === 0)');
 const automaticSeedWaitsForFormalArc =
   audioEngineSource.includes('if (!this.formCycleComplete) return;') &&
   audioEngineSource.includes('this.formCycleComplete ||=');
@@ -2427,6 +2683,19 @@ const sceneLifecycleCountsBars =
   audioEngineSource.includes('this.barsUntilSceneChange <= 0') &&
   audioEngineSource.includes('this.barsUntilSceneChange -= spanBars') &&
   !audioEngineSource.includes('chordsUntilSceneChange');
+
+const integratedInstrumentCoveragePass = Object.keys(INSTRUMENTS).every((instrument) =>
+  (integratedInstrumentAudibleSeconds[instrument] ?? 0) / INTEGRATED_END_SECONDS >
+    (['trumpet', 'trombone', 'timpani'].includes(instrument) ? 0.001 : 0.02)
+);
+const integratedInstrumentDensityPass = [1, 2, 3, 4, 5].every((count) =>
+  (integratedInstrumentCountSeconds[count] ?? 0) / INTEGRATED_END_SECONDS > 0.03
+);
+const integratedRoleDensityPass = [1, 2, 3, 4, 5].every((count) =>
+  (integratedRoleCountSeconds[count] ?? 0) / INTEGRATED_END_SECONDS > 0.025
+);
+const integratedSilenceShare = (integratedRoleCountSeconds[0] ?? 0) /
+  INTEGRATED_END_SECONDS;
 
 const assertions = {
   activeSourceCap: maxActiveSources <= 40,
@@ -2519,6 +2788,11 @@ const assertions = {
     orchestrationCoverage.harmony.size === 4 &&
     orchestrationCoverage.bass.size === 4 &&
     orchestrationCoverage.accompaniment.size === 4,
+  orchestralSectionsCompleteTheEnsemble:
+    orchestralSectionCoverage.brass.size === 3 &&
+    orchestralSectionCoverage.percussion.has('timpani') &&
+    audioEngineSource.includes('scheduleBrassVoice(') &&
+    audioEngineSource.includes('scheduleTimpani('),
   performanceUsesMultipleArticulations: articulationCoverage.size >= 12,
   phraseMelodyPlansClimaxCadenceAndMemory:
     phraseClimaxFailures === 0 &&
@@ -2535,6 +2809,25 @@ const assertions = {
     aDoublePrimeExactMelodyShare < 0.05 &&
     phraseSliceFieldSamples > 1000 &&
     phraseSliceFieldFailures === 0,
+  wholePhraseBeamSearchOptimizesMusicalQuality:
+    beamQualitySamples === formalAuditSamples * FORM_ROLES.length &&
+    averageBeamCandidatePaths > 500 &&
+    averageBeamQualityScore > 0.68 &&
+    averageBeamMotifPitchClassRate > 0.65 &&
+    averageBeamStrongBeatChordToneRate > 0.66 &&
+    averageBeamLeapRecoveryRate > 0.9 &&
+    averageBeamClimaxProminence >= 1.2 &&
+    minimumBeamClimaxProminence >= 1 &&
+    averageBeamCorpusSurprisal < 3.2 &&
+    maximumBeamRepeatedNotes <= 4 &&
+    missingPlannedMidiEvents === 0 &&
+    phraseTraceDeterminismFailures === 0 &&
+    phraseTraceCollisions === 0,
+  melodicPhrasingIsConnected:
+    averageMelodicConnectionRatio > 0.76 &&
+    maximumLeadLeap <= 9 &&
+    leadLeapRecoveryRate > 0.62 &&
+    consecutiveLargeLeadLeaps / Math.max(1, leadSamples) < 0.012,
   accentedDissonanceIsRealAndResolves:
     conservativeStrongBeatChordToneRate > 0.95 &&
     realizedAccentedDissonanceRate > 0.3 &&
@@ -2630,7 +2923,9 @@ const assertions = {
     textureSilentSegments === 0 &&
     textureInactiveSpotlights === 0 &&
     textureMinimumDurationViolations === 0 &&
-    textureRoleFlickerViolations === 0,
+    textureRoleFlickerViolations === 0 &&
+    textureBoundarySamples > 1000 &&
+    textureDisconnectedBoundaries === 0,
   integratedPlanningStackSurvives24Hours:
     integratedNow >= INTEGRATED_END_SECONDS &&
     integratedPhrases > 1000 &&
@@ -2644,26 +2939,25 @@ const assertions = {
     integratedRoleStats.counter.planned > 100 &&
     integratedRoleStats.lead.dropped === 0 &&
     integratedRoleStats.counter.dropped === 0 &&
+    integratedRoleStats.bass.dropped === 0 &&
+    integratedRoleStats.brass.dropped === 0 &&
+    integratedRoleStats.percussion.dropped /
+      Math.max(1, integratedRoleStats.percussion.planned) < 0.001 &&
+    integratedRoleStats.harmony.dropped /
+      Math.max(1, integratedRoleStats.harmony.planned) < 0.025 &&
+    integratedRoleStats.accompaniment.dropped /
+      Math.max(1, integratedRoleStats.accompaniment.planned) < 0.02 &&
     integratedPeakSourceOverlap <= 40 &&
     INTEGRATED_ROLES.every((role) =>
       integratedRoleStats[role].scheduled + integratedRoleStats[role].dropped ===
         integratedRoleStats[role].planned
     ),
   integratedSoundingTextureIsDiverse:
-    Object.keys(INSTRUMENTS).every((instrument) =>
-      (integratedInstrumentAudibleSeconds[instrument] ?? 0) /
-        INTEGRATED_END_SECONDS > 0.02
-    ) &&
-    [1, 2, 3, 4, 5].every((count) =>
-      (integratedInstrumentCountSeconds[count] ?? 0) /
-        INTEGRATED_END_SECONDS > 0.03
-    ) &&
-    [1, 2, 3, 4, 5].every((count) =>
-      (integratedRoleCountSeconds[count] ?? 0) /
-        INTEGRATED_END_SECONDS > 0.03
-    ) &&
-    (integratedRoleCountSeconds[0] ?? 0) / INTEGRATED_END_SECONDS > 0.005 &&
-    (integratedRoleCountSeconds[0] ?? 0) / INTEGRATED_END_SECONDS < 0.08 &&
+    integratedInstrumentCoveragePass &&
+    integratedInstrumentDensityPass &&
+    integratedRoleDensityPass &&
+    integratedSilenceShare > 0.005 &&
+    integratedSilenceShare < 0.08 &&
     integratedPeakSimultaneousInstruments >= 6 &&
     integratedPeakSimultaneousRoles === INTEGRATED_ROLES.length &&
     integratedPeakSimultaneousVoices >= 6,
@@ -2691,12 +2985,14 @@ const assertions = {
     maxPlannedAccompanimentGridError < 1e-9,
   engineUsesNewFormalPlanningStack: engineUsesFormalPlanningStack,
   timbreHandoffsUseDualEqualPowerLayers: engineUsesEqualPowerTimbreHandoffs,
+  orchestralRoleBalanceFollowsInstrumentation: orchestralGainStagingIsExplicit,
   automaticLifecyclePreservesFormalArc:
     automaticSeedWaitsForFormalArc && sceneLifecycleCountsBars,
   seedTransitionsRestAtEndpoints: smootherstepHasRestingEndpoints,
   shaderRandomnessIsStable:
     shaderRandomnessIsTemporallyStable && visualVariants.size === 3,
-  voiceLeadingIsSmooth: averageVoiceMovement < 7,
+  voiceLeadingIsSmooth:
+    averageVoiceMovement < 7 && maximumAlignedVoiceMovement <= 14,
 };
 
 const report = {
@@ -2705,9 +3001,13 @@ const report = {
   averageBackgroundRoughness: Number(averageBackgroundRoughness.toFixed(4)),
   averageCounterMovement: Number(averageCounterMovement.toFixed(3)),
   averageLeadMovement: Number(averageLeadMovement.toFixed(3)),
+  leadLeapRecoveryRate: Number(leadLeapRecoveryRate.toFixed(4)),
+  maximumLeadLeap,
+  consecutiveLargeLeadLeaps,
   averageMelodyRoughness: Number(averageMelodyRoughness.toFixed(4)),
   averagePivotCommonTones: Number(averagePivotCommonTones.toFixed(3)),
   averageVoiceMovement: Number(averageVoiceMovement.toFixed(3)),
+  maximumAlignedVoiceMovement: Number(maximumAlignedVoiceMovement.toFixed(3)),
   bpmRange: [Number(minimumBpm.toFixed(2)), Number(maximumBpm.toFixed(2))],
   brightMoodShare: Number(brightMoodShare.toFixed(4)),
   brightJourneyShare: Number(brightJourneyShare.toFixed(4)),
@@ -2745,6 +3045,12 @@ const report = {
     counterpointOverlapPairs: integratedCounterpointOverlapPairs,
     counterpointViolationPairs: integratedCounterpointViolationPairs,
     counterpointViolationRate: Number(integratedCounterpointViolationRate.toFixed(5)),
+    coverageChecks: {
+      instrumentCoverage: integratedInstrumentCoveragePass,
+      instrumentDensity: integratedInstrumentDensityPass,
+      roleDensity: integratedRoleDensityPass,
+      silenceShare: Number(integratedSilenceShare.toFixed(5)),
+    },
     dropExamples: integratedDropExamples,
     harmonyEvents: integratedHarmonyEvents,
     hoursSimulated: INTEGRATED_HOURS,
@@ -2842,6 +3148,12 @@ const report = {
         [...instruments].sort(),
       ]),
     ),
+    orchestralSectionCoverage: Object.fromEntries(
+      Object.entries(orchestralSectionCoverage).map(([role, instruments]) => [
+        role,
+        [...instruments].sort(),
+      ]),
+    ),
     maxPerformanceInterpolationStep: Number(maxPerformanceInterpolationStep.toFixed(5)),
     maxRolesChanged: maxOrchestrationRoleChanges,
   },
@@ -2866,6 +3178,23 @@ const report = {
   modesVisited: modes.size,
   motifTargetRate: Number(motifTargetRate.toFixed(4)),
   phraseMelodyPlanning: {
+    beamSearch: {
+      averageCandidatePaths: Number(averageBeamCandidatePaths.toFixed(1)),
+      averageClimaxProminence: Number(averageBeamClimaxProminence.toFixed(4)),
+      averageCorpusSurprisal: Number(averageBeamCorpusSurprisal.toFixed(4)),
+      averageLeapRecoveryRate: Number(averageBeamLeapRecoveryRate.toFixed(4)),
+      averageMotifPitchClassRate: Number(averageBeamMotifPitchClassRate.toFixed(4)),
+      averageQualityScore: Number(averageBeamQualityScore.toFixed(4)),
+      averageStrongBeatChordToneRate: Number(
+        averageBeamStrongBeatChordToneRate.toFixed(4),
+      ),
+      maximumRepeatedNotes: maximumBeamRepeatedNotes,
+      minimumClimaxProminence: minimumBeamClimaxProminence,
+      missingPlannedMidiEvents,
+      phraseTraceCollisions,
+      phraseTraceDeterminismFailures,
+      samples: beamQualitySamples,
+    },
     aDoublePrimeExactCopyShare: Number(aDoublePrimeExactMelodyShare.toFixed(4)),
     aPrimeExactCopyShare: Number(aPrimeExactMelodyShare.toFixed(4)),
     cadenceFailures: phraseCadenceFailures,
@@ -2875,6 +3204,7 @@ const report = {
     ),
     controlledAccentedDissonances,
     controlledDissonanceMarkerFailures,
+    averageConnectionRatio: Number(averageMelodicConnectionRatio.toFixed(4)),
     realizedAccentedDissonanceRate: Number(realizedAccentedDissonanceRate.toFixed(4)),
     realizedDissonanceResolutionRate: Number(realizedDissonanceResolutionRate.toFixed(4)),
     sliceFieldFailures: phraseSliceFieldFailures,
@@ -2927,6 +3257,8 @@ const report = {
       ]),
     ),
     inactiveSpotlights: textureInactiveSpotlights,
+    boundarySamples: textureBoundarySamples,
+    disconnectedBoundaries: textureDisconnectedBoundaries,
     maxAccompanimentGridError: maxPlannedAccompanimentGridError,
     minimumDurationViolations: textureMinimumDurationViolations,
     roleFlickerViolations: textureRoleFlickerViolations,

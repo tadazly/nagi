@@ -1,18 +1,26 @@
 import {
   METERS,
+  MODES,
   SeededRandom,
+  chordPitchClasses,
   clamp,
   metricStrengthAt,
+  type BassLinePlan,
   type HarmonicScene,
   type MeterDefinition,
   type PhraseHarmonicPlan,
 } from './generative.ts';
 import {
+  motifPitchClass,
   planMotifPhrase,
   type MotifCounterpointPlan,
   type MotifDNA,
   type MotifEvent,
 } from './composition.ts';
+import {
+  classicalInitialIntervalSurprisal,
+  classicalIntervalTransitionSurprisal,
+} from './classical-prior.ts';
 
 export type PhraseFormRole = 'A' | 'A-prime' | 'B' | 'A-double-prime';
 
@@ -38,6 +46,8 @@ export type PhraseMelodyEvent = MotifEvent & {
   phraseBeat: number;
   phrasePosition: number;
   phraseRole: PhraseMelodicRole;
+  /** MIDI selected by the whole-phrase look-ahead decoder. */
+  plannedMidi?: number;
   resolutionDirection: -1 | 0 | 1;
   resolutionMaximumStep: number;
   retainPreviousPitch: boolean;
@@ -95,12 +105,34 @@ export type PhraseMelodicPlan = {
   formRole: PhraseFormRole;
   leadEvents: readonly PhraseMelodyEvent[];
   phraseBars: number;
+  realization: PhraseMelodyRealizationDiagnostics;
   registerArc: PhraseRegisterArc;
   totalBeats: number;
   variation: PhraseVariationPlan;
 };
 
+export type PhraseMusicalQuality = {
+  climaxProminence: number;
+  corpusSurprisal: number;
+  leapRecoveryRate: number;
+  maximumRepeatedNotes: number;
+  melodicRange: number;
+  motifPitchClassRate: number;
+  score: number;
+  strongBeatChordToneRate: number;
+};
+
+export type PhraseMelodyRealizationDiagnostics = {
+  beamWidth: number;
+  candidatePathsEvaluated: number;
+  counterCost: number;
+  leadCost: number;
+  quality: PhraseMusicalQuality;
+};
+
 export type PhraseMelodyOptions = {
+  bassLinePlan?: BassLinePlan;
+  beamWidth?: number;
   cadenceAtPhraseEnd?: boolean;
   counterEnabled?: boolean;
   counterEntryBar?: number;
@@ -115,6 +147,7 @@ export type PhraseMelodyOptions = {
   maximumLeadEvents?: number;
   openingReference?: PhraseMelodicPlan;
   previousLeadMidi?: number;
+  previousCounterMidi?: number;
   previousPhrase?: PhraseMelodicPlan;
 };
 
@@ -578,6 +611,575 @@ const planRegisterArc = (
   };
 };
 
+type UnrealizedPhrasePlan = Omit<PhraseMelodicPlan, 'realization'>;
+
+type MelodicBeamState = {
+  cost: number;
+  diatonicIntervals: number[];
+  pitches: number[];
+  repeatedNotes: number;
+};
+
+type MelodicDecodeResult = {
+  candidatePathsEvaluated: number;
+  cost: number;
+  events: RealizedPhraseMelodyEvent[];
+};
+
+const midiPitchClass = (midi: number) => wrap(midi, 12);
+
+const modeClassForScene = (scene: HarmonicScene): 'major' | 'minor' =>
+  MODES[scene.modeIndex].intervals[2] === 4 ? 'major' : 'minor';
+
+const absoluteModalDegree = (scene: HarmonicScene, midi: number) => {
+  const mode = MODES[scene.modeIndex].intervals;
+  const pitchClassInMode = wrap(midi - scene.tonic, 12);
+  const degree = mode.indexOf(pitchClassInMode);
+  if (degree < 0) return Math.round((midi - scene.tonic) * 7 / 12);
+  const octave = Math.round((midi - scene.tonic - mode[degree]) / 12);
+  return octave * mode.length + degree;
+};
+
+const diatonicInterval = (
+  scene: HarmonicScene,
+  fromMidi: number,
+  toMidi: number,
+) => absoluteModalDegree(scene, toMidi) - absoluteModalDegree(scene, fromMidi);
+
+const harmonyAtPhraseBeat = (
+  harmony: PhraseHarmonicPlan | undefined,
+  phraseBeat: number,
+  beatsPerBar: number,
+) => harmony?.events.find((event) => {
+  const beat = event.startBar * beatsPerBar;
+  return phraseBeat >= beat - 0.001 &&
+    phraseBeat < beat + event.spanBars * beatsPerBar - 0.001;
+}) ?? harmony?.events.at(-1);
+
+const bassAtPhraseBeat = (
+  bass: BassLinePlan | undefined,
+  phraseBeat: number,
+  beatsPerBar: number,
+) => bass?.events.find((event) => {
+  const beat = event.startBar * beatsPerBar;
+  return phraseBeat >= beat - 0.001 &&
+    phraseBeat < beat + event.spanBars * beatsPerBar - 0.001;
+}) ?? bass?.events.at(-1);
+
+const scaleClassDistance = (
+  scene: HarmonicScene,
+  fromPitchClass: number,
+  toPitchClass: number,
+) => {
+  const mode = MODES[scene.modeIndex].intervals;
+  const from = mode.indexOf(wrap(fromPitchClass - scene.tonic, 12));
+  const to = mode.indexOf(wrap(toPitchClass - scene.tonic, 12));
+  if (from < 0 || to < 0) return 3;
+  const distance = Math.abs(from - to);
+  return Math.min(distance, mode.length - distance);
+};
+
+const candidateMidisForEvent = (
+  scene: HarmonicScene,
+  event: PhraseMelodyEvent,
+  previousMidi: number,
+  lowMidi: number,
+  highMidi: number,
+) => {
+  if (
+    event.retainPreviousPitch &&
+    previousMidi >= lowMidi &&
+    previousMidi <= highMidi
+  ) return [previousMidi];
+
+  const mode = MODES[scene.modeIndex].intervals;
+  const targetPitchClass = motifPitchClass(scene, event.motifDegree);
+  const modal = Array.from(
+    { length: Math.max(0, highMidi - lowMidi + 1) },
+    (_, index) => lowMidi + index,
+  ).filter((midi) => mode.includes(wrap(midi - scene.tonic, 12)));
+  const exact = modal.filter((midi) => midiPitchClass(midi) === targetPitchClass);
+  const structural = event.metricStrength >= 0.68 ||
+    event.phraseRole === 'statement' ||
+    event.phraseRole === 'climax' ||
+    event.phraseRole === 'cadence';
+  if (structural || event.motifIndex === 0) return exact.length > 0 ? exact : modal;
+  const neighbors = modal.filter((midi) =>
+    scaleClassDistance(scene, midiPitchClass(midi), targetPitchClass) <= 1
+  );
+  return neighbors.length > 0 ? neighbors : exact.length > 0 ? exact : modal;
+};
+
+const leadAtBeat = (
+  leadEvents: readonly RealizedPhraseMelodyEvent[],
+  beat: number,
+) => leadEvents.findLast((event) =>
+  event.beat <= beat + 0.001 && eventEnd(event) > beat + 0.001
+  ) ?? leadEvents.findLast((event) => event.beat <= beat + 0.001) ?? leadEvents[0];
+
+const stableCounterInterval = (interval: number) =>
+  [0, 3, 4, 5, 7, 8, 9].includes(wrap(interval, 12));
+
+const perfectCounterInterval = (interval: number) =>
+  [0, 7].includes(wrap(interval, 12));
+
+const pathGlobalCost = (
+  events: readonly PhraseMelodyEvent[],
+  pitches: readonly number[],
+  role: 'lead' | 'counter',
+) => {
+  if (pitches.length === 0) return 0;
+  let cost = 0;
+  const range = Math.max(...pitches) - Math.min(...pitches);
+  if (role === 'lead') {
+    if (range < 5) cost += (5 - range) * 1.6;
+    if (range > 16) cost += (range - 16) * 1.1;
+    const climaxIndex = events.findIndex((event) => event.phraseRole === 'climax');
+    if (climaxIndex >= 0) {
+      const otherMaximum = Math.max(
+        ...pitches.filter((_, index) => index !== climaxIndex),
+        -Infinity,
+      );
+      const prominence = pitches[climaxIndex] - otherMaximum;
+      if (prominence < 1) cost += (1 - prominence) * 5.5;
+    }
+  } else {
+    if (range < 3) cost += (3 - range) * 0.8;
+    if (range > 14) cost += (range - 14) * 0.9;
+  }
+  let oneDirectionRun = 0;
+  let previousDirection = 0;
+  for (let index = 1; index < pitches.length; index += 1) {
+    const interval = pitches[index] - pitches[index - 1];
+    const direction = Math.sign(interval);
+    oneDirectionRun = direction !== 0 && direction === previousDirection
+      ? oneDirectionRun + 1
+      : direction === 0 ? 0 : 1;
+    if (oneDirectionRun > 4) cost += (oneDirectionRun - 4) * 0.72;
+    if (Math.abs(interval) >= 5 && index + 1 < pitches.length) {
+      const recovery = pitches[index + 1] - pitches[index];
+      const recovered = recovery !== 0 &&
+        Math.sign(recovery) === -Math.sign(interval) &&
+        Math.abs(recovery) <= 2;
+      if (!recovered) cost += 12;
+    }
+    previousDirection = direction;
+  }
+  return cost;
+};
+
+const decodeMelodicVoice = (
+  scene: HarmonicScene,
+  events: readonly PhraseMelodyEvent[],
+  plan: UnrealizedPhrasePlan,
+  random: SeededRandom,
+  options: PhraseMelodyOptions,
+  role: 'lead' | 'counter',
+  leadEvents: readonly RealizedPhraseMelodyEvent[] = [],
+): MelodicDecodeResult => {
+  if (events.length === 0) {
+    return { candidatePathsEvaluated: 0, cost: 0, events: [] };
+  }
+  const beamWidth = Math.round(clamp(options.beamWidth ?? 16, 8, 32));
+  const lowMidi = role === 'lead'
+    ? plan.registerArc.leadLowMidi
+    : plan.registerArc.counterLowMidi;
+  const highMidi = role === 'lead'
+    ? plan.registerArc.leadHighMidi
+    : plan.registerArc.counterHighMidi;
+  const initialMidi = role === 'lead'
+    ? options.previousLeadMidi ?? plan.registerArc.startMidi
+    : options.previousCounterMidi ?? Math.min(plan.registerArc.startMidi - 8, highMidi);
+  const modeClass = modeClassForScene(scene);
+  const modalRegister = Array.from(
+    { length: Math.max(0, highMidi - lowMidi + 1) },
+    (_, index) => lowMidi + index,
+  ).filter((midi) =>
+    MODES[scene.modeIndex].intervals.includes(wrap(midi - scene.tonic, 12))
+  );
+  const climaxEvent = role === 'lead'
+    ? events.find((event) => event.phraseRole === 'climax')
+    : undefined;
+  const climaxAnchorMidi = climaxEvent
+    ? candidateMidisForEvent(
+        scene,
+        climaxEvent,
+        initialMidi,
+        lowMidi,
+        highMidi,
+      ).sort((left, right) =>
+        Math.abs(left - plan.registerArc.climaxMidi) -
+          Math.abs(right - plan.registerArc.climaxMidi) || right - left
+      )[0]
+    : undefined;
+  let candidatePathsEvaluated = 0;
+  let beam: MelodicBeamState[] = [{
+    cost: 0,
+    diatonicIntervals: [],
+    pitches: [],
+    repeatedNotes: 0,
+  }];
+
+  events.forEach((event, eventIndex) => {
+    const harmonyEvent = harmonyAtPhraseBeat(
+      options.harmonyPlan,
+      event.phraseBeat,
+      plan.beatsPerBar,
+    );
+    const chordDegree = harmonyEvent?.degree ?? 0;
+    const chordClasses = new Set(chordPitchClasses(scene, chordDegree));
+    const bassMidi = bassAtPhraseBeat(
+      options.bassLinePlan,
+      event.phraseBeat,
+      plan.beatsPerBar,
+    )?.bassMidi;
+    const targetPitchClass = motifPitchClass(scene, event.motifDegree);
+    const leadReference = role === 'counter'
+      ? leadAtBeat(leadEvents, event.phraseBeat)
+      : undefined;
+    const previousLeadReference = role === 'counter' && eventIndex > 0
+      ? leadAtBeat(leadEvents, events[eventIndex - 1].phraseBeat)
+      : undefined;
+    const expanded: MelodicBeamState[] = [];
+
+    for (const state of beam) {
+      const previousMidi = state.pitches.at(-1) ?? initialMidi;
+      const previousInterval = state.pitches.length >= 2
+        ? state.pitches.at(-1)! - state.pitches.at(-2)!
+        : 0;
+      let candidates = candidateMidisForEvent(
+        scene,
+        event,
+        previousMidi,
+        lowMidi,
+        highMidi,
+      );
+      if (
+        event.metricStrength >= 0.66 &&
+        event.phraseRole !== 'cadence' &&
+        event.phraseRole !== 'climax'
+      ) {
+        candidates = [...new Set([
+          ...candidates,
+          ...modalRegister.filter((midi) => chordClasses.has(midiPitchClass(midi))),
+        ])];
+      }
+      if (Math.abs(previousInterval) >= 5) {
+        candidates = [...new Set([
+          ...candidates,
+          ...modalRegister.filter((midi) => {
+            const recovery = midi - previousMidi;
+            return recovery !== 0 &&
+              Math.sign(recovery) === -Math.sign(previousInterval) &&
+              Math.abs(recovery) <= 2;
+          }),
+        ])];
+      }
+      if (role === 'lead' && climaxAnchorMidi !== undefined) {
+        candidates = event.phraseRole === 'climax'
+          ? [climaxAnchorMidi]
+          : candidates.filter((midi) => midi < climaxAnchorMidi);
+        if (candidates.length === 0) {
+          candidates = modalRegister.filter((midi) => midi < climaxAnchorMidi);
+        }
+      }
+      for (const midi of candidates) {
+        candidatePathsEvaluated += 1;
+        const interval = midi - previousMidi;
+        const distance = Math.abs(interval);
+        const diatonic = diatonicInterval(scene, previousMidi, midi);
+        const previousEvent = events[eventIndex - 1];
+        const chordTone = chordClasses.has(midiPitchClass(midi));
+        const pitchClassMatch = midiPitchClass(midi) === targetPitchClass;
+        const tension = harmonyEvent?.tensionTarget ?? scene.tension;
+        let cost = state.cost + Math.abs(midi - event.targetMidi) * 0.09;
+
+        cost += pitchClassMatch
+          ? -1.35
+          : 1.2 + scaleClassDistance(scene, midiPitchClass(midi), targetPitchClass) * 0.82;
+        if (event.metricStrength >= 0.68 || event.phraseRole === 'cadence') {
+          cost += chordTone ? -1.45 : event.accentedDissonanceAllowed ? 0.65 : 7.5;
+        } else if (event.harmonicIntent === 'passing' || event.harmonicIntent === 'neighbor') {
+          cost += chordTone ? -0.2 : -0.48;
+        }
+        if (event.phraseRole === 'cadence' && eventIndex === events.length - 1) {
+          cost += chordTone && pitchClassMatch ? -3.4 : 14;
+        }
+        if (event.phraseRole === 'climax') {
+          cost += Math.abs(midi - plan.registerArc.climaxMidi) * 0.58;
+        } else if (role === 'lead' && midi >= plan.registerArc.climaxMidi) {
+          cost += 2.6 + (midi - plan.registerArc.climaxMidi) * 0.8;
+        }
+
+        cost += distance * 0.12;
+        if (distance > (eventIndex === 0 && role === 'lead' ? 5 : 7)) {
+          cost += (distance - (eventIndex === 0 && role === 'lead' ? 5 : 7)) * 8.5;
+        }
+        const repeatedNotes = distance === 0 ? state.repeatedNotes + 1 : 0;
+        if (!event.retainPreviousPitch && repeatedNotes > 0) {
+          cost += repeatedNotes * 1.8;
+        }
+        if (Math.abs(previousInterval) >= 5) {
+          const recovers = interval !== 0 &&
+            Math.sign(interval) === -Math.sign(previousInterval) &&
+            distance <= 2;
+          cost += recovers ? -3.2 : 6.8 + Math.max(0, distance - 2) * 1.1;
+        }
+        if (previousEvent?.mustResolveNext) {
+          const directionMatches = previousEvent.resolutionDirection === 0 ||
+            Math.sign(interval) === previousEvent.resolutionDirection;
+          const maximumStep = previousEvent.resolutionMaximumStep || 2;
+          cost += directionMatches && distance > 0 && distance <= maximumStep
+            ? -4.5
+            : 18;
+        }
+        if (previousEvent) {
+          const intendedDirection = Math.sign(event.motifDegree - previousEvent.motifDegree) ||
+            Math.sign(event.targetMidi - previousEvent.targetMidi);
+          if (intendedDirection !== 0 && interval !== 0 && Math.sign(interval) !== intendedDirection) {
+            cost += 1.5;
+          }
+        }
+        const intervalHistory = state.diatonicIntervals;
+        if (intervalHistory.length === 0) {
+          cost += classicalInitialIntervalSurprisal(diatonic, modeClass) * 0.32;
+        } else if (intervalHistory.length >= 2) {
+          cost += classicalIntervalTransitionSurprisal(
+            intervalHistory.at(-2)!,
+            intervalHistory.at(-1)!,
+            diatonic,
+            modeClass,
+            event.metricStrength,
+          ) * 0.42;
+        }
+        // When harmony already carries surprise, the melody spends less of the
+        // same perceptual budget on leaps and accented non-chord tones.
+        if (tension > 0.62) {
+          cost += Math.max(0, distance - 3) * 0.7 + (!chordTone ? 1.1 : 0);
+        }
+        if (bassMidi !== undefined) {
+          const vertical = wrap(midi - bassMidi, 12);
+          if ([1, 2, 10, 11].includes(vertical)) cost += 1.4;
+        }
+
+        if (role === 'counter' && leadReference) {
+          const vertical = wrap(leadReference.midi - midi, 12);
+          if (midi > leadReference.midi - 3) cost += 24;
+          if (event.metricStrength >= 0.66 && !stableCounterInterval(vertical)) cost += 5.8;
+          if (previousLeadReference && state.pitches.length > 0) {
+            const previousCounter = state.pitches.at(-1)!;
+            const previousVertical = wrap(previousLeadReference.midi - previousCounter, 12);
+            const leadMotion = Math.sign(leadReference.midi - previousLeadReference.midi);
+            const counterMotion = Math.sign(midi - previousCounter);
+            if (
+              perfectCounterInterval(previousVertical) &&
+              perfectCounterInterval(vertical) &&
+              leadMotion !== 0 && leadMotion === counterMotion
+            ) cost += 11;
+            if (leadMotion === 0 || counterMotion === 0 || leadMotion === -counterMotion) {
+              cost -= 0.72;
+            }
+          }
+        }
+        cost += random.next() * 0.045;
+        expanded.push({
+          cost,
+          diatonicIntervals: [...state.diatonicIntervals, diatonic].slice(-3),
+          pitches: [...state.pitches, midi],
+          repeatedNotes,
+        });
+      }
+    }
+    const unique = new Map<string, MelodicBeamState>();
+    expanded
+      .sort((left, right) => left.cost - right.cost)
+      .forEach((state) => {
+        const key = state.pitches.slice(-3).join(',');
+        if (!unique.has(key)) unique.set(key, state);
+      });
+    beam = [...unique.values()].slice(0, beamWidth);
+  });
+
+  const selected = beam
+    .map((state) => ({
+      ...state,
+      cost: state.cost + pathGlobalCost(events, state.pitches, role),
+    }))
+    .sort((left, right) => left.cost - right.cost)[0];
+  const pitches = selected?.pitches ?? events.map((event) => Math.round(event.targetMidi));
+  return {
+    candidatePathsEvaluated,
+    cost: selected?.cost ?? 0,
+    events: events.map((event, index) => ({
+      ...event,
+      midi: pitches[index] ?? Math.round(event.targetMidi),
+    })),
+  };
+};
+
+export const evaluatePhraseRealization = (
+  scene: HarmonicScene,
+  plan: Pick<
+    PhraseMelodicPlan,
+    'beatsPerBar' | 'climax' | 'leadEvents' | 'registerArc'
+  >,
+  harmonyPlan?: PhraseHarmonicPlan,
+): PhraseMusicalQuality => {
+  const events = plan.leadEvents.filter((event) => event.plannedMidi !== undefined);
+  const pitches = events.map((event) => event.plannedMidi!);
+  if (pitches.length === 0) {
+    return {
+      climaxProminence: 0,
+      corpusSurprisal: 7,
+      leapRecoveryRate: 1,
+      maximumRepeatedNotes: 0,
+      melodicRange: 0,
+      motifPitchClassRate: 0,
+      score: 0,
+      strongBeatChordToneRate: 0,
+    };
+  }
+  const intervals = pitches.slice(1).map((pitch, index) => pitch - pitches[index]);
+  const diatonicIntervals = pitches.slice(1).map((pitch, index) =>
+    diatonicInterval(scene, pitches[index], pitch)
+  );
+  const modeClass = modeClassForScene(scene);
+  const surprisals = diatonicIntervals.map((interval, index) => index < 2
+    ? classicalInitialIntervalSurprisal(interval, modeClass)
+    : classicalIntervalTransitionSurprisal(
+        diatonicIntervals[index - 2],
+        diatonicIntervals[index - 1],
+        interval,
+        modeClass,
+        events[index + 1]?.metricStrength ?? 0.5,
+      )
+  );
+  let leapAttempts = 0;
+  let leapRecoveries = 0;
+  intervals.slice(0, -1).forEach((interval, index) => {
+    if (Math.abs(interval) < 5) return;
+    leapAttempts += 1;
+    const following = intervals[index + 1];
+    if (
+      following !== 0 &&
+      Math.sign(following) === -Math.sign(interval) &&
+      Math.abs(following) <= 2
+    ) leapRecoveries += 1;
+  });
+  let repeated = 0;
+  let maximumRepeatedNotes = 0;
+  intervals.forEach((interval) => {
+    repeated = interval === 0 ? repeated + 1 : 0;
+    maximumRepeatedNotes = Math.max(maximumRepeatedNotes, repeated);
+  });
+  const strongBeatEvents = events.filter((event) => event.metricStrength >= 0.66);
+  const strongBeatChordTones = strongBeatEvents.filter((event) => {
+    const harmony = harmonyAtPhraseBeat(
+      harmonyPlan,
+      event.phraseBeat,
+      plan.beatsPerBar,
+    );
+    return chordPitchClasses(scene, harmony?.degree ?? 0)
+      .includes(midiPitchClass(event.plannedMidi!));
+  }).length;
+  const climaxIndex = Math.max(0, Math.min(plan.climax.eventIndex, pitches.length - 1));
+  const otherMaximum = Math.max(
+    ...pitches.filter((_, index) => index !== climaxIndex),
+    -Infinity,
+  );
+  const climaxProminence = pitches[climaxIndex] - otherMaximum;
+  const corpusSurprisal = surprisals.reduce((sum, value) => sum + value, 0) /
+    Math.max(1, surprisals.length);
+  const leapRecoveryRate = leapRecoveries / Math.max(1, leapAttempts);
+  const melodicRange = Math.max(...pitches) - Math.min(...pitches);
+  const motifPitchClassRate = events.filter((event) =>
+    midiPitchClass(event.plannedMidi!) === motifPitchClass(scene, event.motifDegree)
+  ).length / events.length;
+  const strongBeatChordToneRate = strongBeatChordTones /
+    Math.max(1, strongBeatEvents.length);
+  const rangeScore = clamp(1 - Math.abs(melodicRange - 10) / 10);
+  const corpusScore = clamp(1 - Math.max(0, corpusSurprisal - 1.8) / 4.2);
+  const score = clamp(
+    motifPitchClassRate * 0.24 +
+      strongBeatChordToneRate * 0.22 +
+      leapRecoveryRate * 0.17 +
+      clamp((climaxProminence + 1) / 4) * 0.13 +
+      rangeScore * 0.1 +
+      clamp(1 - maximumRepeatedNotes / 3) * 0.06 +
+      corpusScore * 0.08,
+  );
+  return {
+    climaxProminence,
+    corpusSurprisal,
+    leapRecoveryRate,
+    maximumRepeatedNotes,
+    melodicRange,
+    motifPitchClassRate,
+    score,
+    strongBeatChordToneRate,
+  };
+};
+
+export const realizePhraseMelodyPlan = (
+  scene: HarmonicScene,
+  plan: UnrealizedPhrasePlan,
+  random: SeededRandom,
+  options: PhraseMelodyOptions,
+): PhraseMelodicPlan => {
+  const beamWidth = Math.round(clamp(options.beamWidth ?? 16, 8, 32));
+  const realizationRandom = random.fork(
+    `phrase-realization:${plan.formRole}:${plan.totalBeats}:` +
+      `${plan.leadEvents[0]?.cycle ?? 0}:${plan.leadEvents.length}`,
+  );
+  const lead = decodeMelodicVoice(
+    scene,
+    plan.leadEvents,
+    plan,
+    realizationRandom,
+    options,
+    'lead',
+  );
+  const counter = decodeMelodicVoice(
+    scene,
+    plan.counterEvents,
+    plan,
+    realizationRandom,
+    options,
+    'counter',
+    lead.events,
+  );
+  const reconciled = reconcilePhraseCounterpoint(lead.events, counter.events, {
+    allowedPitchClasses: MODES[scene.modeIndex].intervals.map((interval) =>
+      wrap(scene.tonic + interval, 12)
+    ),
+    counterHighMidi: plan.registerArc.counterHighMidi,
+    counterLowMidi: plan.registerArc.counterLowMidi,
+    minimumVoiceGapSemitones: 3,
+  });
+  const realizedPlan: UnrealizedPhrasePlan = {
+    ...plan,
+    counterEvents: plan.counterEvents.map((event, index) => ({
+      ...event,
+      plannedMidi: reconciled.counterEvents[index]?.midi ?? counter.events[index]?.midi,
+    })),
+    leadEvents: plan.leadEvents.map((event, index) => ({
+      ...event,
+      plannedMidi: reconciled.leadEvents[index]?.midi ?? lead.events[index]?.midi,
+    })),
+  };
+  return {
+    ...realizedPlan,
+    realization: {
+      beamWidth,
+      candidatePathsEvaluated:
+        lead.candidatePathsEvaluated + counter.candidatePathsEvaluated,
+      counterCost: counter.cost,
+      leadCost: lead.cost,
+      quality: evaluatePhraseRealization(scene, realizedPlan, options.harmonyPlan),
+    },
+  };
+};
+
 export const planPhraseMelody = (
   scene: HarmonicScene,
   random: SeededRandom,
@@ -655,24 +1257,35 @@ export const planPhraseMelody = (
     entryBeat,
     totalBeats,
   );
+  const counterSpanBeats = Math.max(0, exitBeat - entryBeat);
+  const counterSpanBars = counterSpanBeats / meter.beatsPerBar;
+  const relativeLeadEvents = leadEvents
+    .filter((event) =>
+      event.beat < exitBeat - 0.001 && eventEnd(event) > entryBeat + 0.001
+    )
+    .map((event) => ({ ...event, beat: event.beat - entryBeat }));
   const rawCounter = counterEnabled
     ? planMotifPhrase(
         scene,
-        phraseBars,
+        counterSpanBars,
         random,
         'counter',
         counterMotif,
-        0,
+        entryBeat / meter.beatsPerBar,
         {
-          cadenceAtPhraseEnd: options.cadenceAtPhraseEnd,
-          counterpointAgainst: leadEvents,
+          cadenceAtPhraseEnd:
+            options.cadenceAtPhraseEnd !== false && exitBeat >= totalBeats - 0.001,
+          counterpointAgainst: relativeLeadEvents,
           maximumEvents: options.maximumCounterEvents ?? Math.max(5, Math.floor(leadEvents.length * 0.58)),
         },
       )
-        .filter((event) => event.beat >= entryBeat && event.beat < exitBeat)
         .map((event) => ({
           ...event,
-          durationBeats: Math.min(event.durationBeats, exitBeat - event.beat),
+          beat: event.beat + entryBeat,
+          durationBeats: Math.min(
+            event.durationBeats,
+            exitBeat - (event.beat + entryBeat),
+          ),
         }))
     : [];
   const counterEvents = decorateCounter(rawCounter, registerArc, totalBeats);
@@ -688,7 +1301,7 @@ export const planPhraseMelody = (
       : ['contour-preservation', 'rhythmic-displacement', 'sequence']
     : [];
 
-  return {
+  const plan: UnrealizedPhrasePlan = {
     beatsPerBar: meter.beatsPerBar,
     cadence: {
       approachBeat: cadenceApproach?.phraseBeat ?? totalBeats,
@@ -718,6 +1331,7 @@ export const planPhraseMelody = (
       techniques,
     },
   };
+  return realizePhraseMelodyPlan(scene, plan, random, options);
 };
 
 const sliceEvents = (
@@ -772,14 +1386,14 @@ const candidateCounterMidis = (
   lowMidi: number,
   highMidi: number,
 ) => {
-  const candidates = new Set<number>();
-  for (let octave = -3; octave <= 3; octave += 1) {
-    for (const adjustment of [0, -1, 1, -2, 2]) {
-      const midi = originalMidi + octave * 12 + adjustment;
-      if (midi >= lowMidi && midi <= highMidi) candidates.add(midi);
-    }
-  }
-  return [...candidates];
+  const safeLow = Math.ceil(lowMidi);
+  const safeHigh = Math.floor(highMidi);
+  return Array.from(
+    { length: Math.max(0, safeHigh - safeLow + 1) },
+    (_, index) => safeLow + index,
+  ).sort((left, right) =>
+    Math.abs(left - originalMidi) - Math.abs(right - originalMidi) || left - right
+  );
 };
 
 export const reconcilePhraseCounterpoint = (

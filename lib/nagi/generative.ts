@@ -283,6 +283,7 @@ export type MelodyChoiceContext = {
   metricStrength?: number;
   mustResolve?: boolean;
   otherVoiceMidi?: number;
+  previousInterval?: number;
   phraseRole?:
     | 'pickup'
     | 'statement'
@@ -731,6 +732,23 @@ export const harmonicFunctionForDegree = (
 export const degreeTension = (degree: number) =>
   DEGREE_TENSION[wrapDegree(degree, DEGREE_TENSION.length)];
 
+/** Mode-aware functional tension for planning and transport diagnostics. */
+export const degreeTensionForScene = (
+  scene: HarmonicScene,
+  degree: number,
+) => {
+  const functionTension: Readonly<Record<HarmonicFunction, number>> = {
+    tonic: 0.06,
+    predominant: 0.38,
+    dominant: 0.72,
+    color: 0.5,
+  };
+  const harmonicFunction = harmonicFunctionForDegree(scene, degree);
+  const instability = (1 - degreeTriadComfort(scene, degree)) * 0.2;
+  const identityColour = Math.max(0, modeChordIdentityWeight(scene, degree) - 1) * 0.035;
+  return clamp(functionTension[harmonicFunction] + instability + identityColour);
+};
+
 export const degreeTriadComfort = (scene: HarmonicScene, degree: number) => {
   const mode = MODES[scene.modeIndex].intervals;
   const pitchAt = (scaleDegree: number) =>
@@ -906,7 +924,8 @@ export const chooseNextDegree = (
     weight *= phraseFunctionWeight(nextFunction);
     weight *= 0.12 + degreeTriadComfort(scene, degree) * 0.88;
     weight *= modeChordIdentityWeight(scene, degree);
-    const tensionDistance = Math.abs(degreeTension(degree) - scene.tension);
+    const degreeTension = degreeTensionForScene(scene, degree);
+    const tensionDistance = Math.abs(degreeTension - scene.tension);
     weight *= 1.2 - tensionDistance * 0.62;
     if (degree === wrapDegree(currentDegree, modeLength)) weight *= 0.22;
     if (degree === 0) {
@@ -915,7 +934,7 @@ export const chooseNextDegree = (
       weight *= 1 + scene.cadenceBias * 1.1;
     }
     if (currentFunction === 'dominant' && nextFunction === 'tonic') weight *= 2.15;
-    if (degreeTension(degree) > 0.6) {
+    if (degreeTension > 0.6) {
       weight *= 0.08 + scene.tension * 0.24;
     }
     if (nextFunction === 'color') weight *= 0.5;
@@ -1392,12 +1411,15 @@ const voicingCost = (
     if (!representedClasses.has(noteClass)) cost += index === 2 ? 1.2 : 4.4;
   });
 
-  if (previous.length === notes.length) {
+  const continuityTargets = voiceLeadingTargets(previous, notes.length);
+  if (continuityTargets.length === notes.length) {
     for (let index = 0; index < notes.length; index += 1) {
-      const motion = notes[index] - previous[index];
+      const motion = notes[index] - continuityTargets[index];
       cost += Math.abs(motion) * (index === 0 ? 0.18 : 0.34);
-      if (Math.abs(motion) > 7) cost += (Math.abs(motion) - 7) * 1.4;
+      if (Math.abs(motion) > 7) cost += (Math.abs(motion) - 7) * 6;
     }
+  }
+  if (previous.length === notes.length) {
     for (let low = 0; low < notes.length; low += 1) {
       for (let high = low + 1; high < notes.length; high += 1) {
         const previousInterval = pitchClass(previous[high] - previous[low]);
@@ -1422,13 +1444,47 @@ const voicingCost = (
         }
       });
     }
-  } else if (previous.length > 0) {
-    cost += notes.reduce(
-      (sum, note) => sum + Math.min(...previous.map((old) => Math.abs(note - old))) * 0.26,
-      0,
-    );
   }
   return cost;
+};
+
+const interpolateVoice = (voices: readonly number[], position: number) => {
+  if (voices.length === 0) return 61;
+  if (voices.length === 1) return voices[0];
+  const cursor = clamp(position) * (voices.length - 1);
+  const low = Math.floor(cursor);
+  const high = Math.min(voices.length - 1, low + 1);
+  const mix = cursor - low;
+  return voices[low] + (voices[high] - voices[low]) * mix;
+};
+
+/**
+ * Preserve register identity when the arrangement adds or removes chord
+ * voices. Bass remains bass; upper voices are sampled across the old voicing
+ * instead of being reset to generic register centres.
+ */
+export const voiceLeadingTargets = (
+  previous: readonly number[],
+  nextVoiceCount: number,
+) => {
+  const count = Math.max(0, Math.round(nextVoiceCount));
+  if (count === 0 || previous.length === 0) return [];
+  if (count === 1) return [previous[0]];
+  const previousUpper = previous.slice(1);
+  const upperCount = count - 1;
+  return [
+    previous[0],
+    ...Array.from({ length: upperCount }, (_, index) => {
+      const position = upperCount === 1 ? 1 : index / (upperCount - 1);
+      if (upperCount === 1) return previousUpper.at(-1) ?? previous[0] + 12;
+      if (previousUpper.length === 1) {
+        // Preserve the old soprano as soprano and let newly entering inner
+        // voices fill below it; do not pretend every new desk is the old line.
+        return previousUpper[0] - (1 - position) * 12;
+      }
+      return interpolateVoice(previousUpper, index / (upperCount - 1));
+    }),
+  ];
 };
 
 export const chooseHarmonyVoiceCount = (
@@ -1470,6 +1526,7 @@ export const voiceLeadChord = (
   const count = Math.round(clamp(voiceCount, 1, 7));
   const ranges = Array.from({ length: count }, (_, voiceIndex) => {
     if (voiceIndex === 0) return [38, 55] as const;
+    if (count === 2) return [55, 84] as const;
     const position = count <= 2 ? 0.72 : (voiceIndex - 1) / Math.max(1, count - 2);
     const low = Math.round(47 + position * 20);
     return [low, Math.min(86, low + 15)] as const;
@@ -1481,6 +1538,7 @@ export const voiceLeadChord = (
   const bassClass = requestedBassMidi === undefined
     ? chordBassPitchClass(scene, degree, options.inversion ?? 0)
     : pitchClass(requestedBassMidi);
+  const continuityTargets = voiceLeadingTargets(previous, count);
   const candidates = ranges.map(([low, high], voiceIndex) => {
     const values: number[] = [];
     for (let midi = low; midi <= high; midi += 1) {
@@ -1496,8 +1554,8 @@ export const voiceLeadChord = (
     }
     const target = voiceIndex === 0 && requestedBassMidi !== undefined
       ? requestedBassMidi
-      : previous.length === count && previous[voiceIndex] !== undefined
-      ? previous[voiceIndex]
+      : continuityTargets[voiceIndex] !== undefined
+      ? continuityTargets[voiceIndex]
       : voiceIndex === 0
         ? 46
         : 52 + ((voiceIndex - 1) / Math.max(1, count - 2)) * 28;
@@ -2172,6 +2230,26 @@ export const pickMelodyMidi = (
         score += 0.62;
       }
       if (context.direction && interval === 0) score += 0.58;
+      if (
+        context.previousInterval !== undefined &&
+        Math.abs(context.previousInterval) >= 5
+      ) {
+        const previousDirection = Math.sign(context.previousInterval);
+        const currentDirection = Math.sign(interval);
+        const recoversByStep =
+          currentDirection !== 0 &&
+          currentDirection === -previousDirection &&
+          distance <= 2;
+        if (recoversByStep) {
+          score -= 4.2;
+        } else {
+          score += 3.4;
+          if (currentDirection === previousDirection) {
+            score += 2.6 + Math.max(0, distance - 2) * 0.72;
+          }
+          if (distance > 4) score += (distance - 4) * 0.9;
+        }
+      }
       if (context.otherVoiceMidi !== undefined) {
         const vertical = pitchClass(Math.abs(midi - context.otherVoiceMidi));
         if ([1, 2, 10, 11].includes(vertical)) score += 1.8;

@@ -15,7 +15,7 @@ browser check.
 | Macro form | `lib/nagi/generative.ts` | Statement, development, intensification, release, true opening recall; twelve emotional identities |
 | Harmony | `lib/nagi/generative.ts` | Twelve mode-specific grammars, tonal centres, A/A′/B/A″ phrase memory, pivots, voice leading |
 | Rhythm and motif | `lib/nagi/composition.ts`, `lib/nagi/phrase-melody.ts`, `lib/nagi/classical-prior.ts` | Whole-phrase melodic skeletons, climax/cadence plans, corpus-informed motifs, realized counterpoint |
-| Orchestration | `lib/nagi/performance.ts`, `lib/nagi/texture-planning.ts` | Five roles, seventeen instruments, sparse-to-full texture plans, meter-aware accompaniment and hand-offs |
+| Orchestration | `lib/nagi/performance.ts`, `lib/nagi/texture-planning.ts` | Five phrase roles plus structural brass/percussion, twenty instruments, sparse-to-tutti texture plans and hand-offs |
 | Synthesis and mix | `lib/nagi/audio-engine.ts` | Additive waves, filtered noise/transients, envelopes, vibrato, delay, convolution, dynamics |
 | Interaction | `app/page.tsx`, `lib/nagi/audio-engine.ts` | Pointer energy, spatial movement, short quantized tonal ripples, playback and volume |
 | Visual generation | `app/nagi-scene.tsx`, `lib/nagi/visual-presets.ts` | 36 emotion-specific shader templates, palettes, weather, core geometry, particles and post FX |
@@ -85,6 +85,11 @@ harmony as desirable. Low-register spacing, sensory roughness, parallel
 perfect motion, strong-beat consonance, and resolution behaviour remain scored
 explicitly.
 
+Tension is no longer read from one Ionian-shaped seven-degree table for every
+mode. Each chord now combines its mode-specific harmonic function with triad
+stability and characteristic-colour weight. Mixolydian minor-v, Lydian II and
+Phrygian flat-II therefore do not inherit an unrelated major-key tension value.
+
 ### Form, rhythm and melody
 
 Chord spans previously could jump over an exact phrase boundary. Every span is
@@ -96,7 +101,10 @@ harmonic scene before sufficient visual/weather blending; the preferred commit
 point is a phrase boundary, with a late-transition fallback to avoid stalling.
 
 The OpenScore Lieder prior remains a statistical influence for local contour,
-rhythm, metric stability, cadence motion and bass affinity. Runtime metric
+rhythm, metric stability, cadence motion and bass affinity. Its conditioned
+second-order interval counts are also exposed as smoothed information cost, so
+complete candidate paths can be compared instead of merely sampling the next
+note. Runtime metric
 conditioning now receives the generated note's real onset and meter instead of
 inferring a false beat class from its index. Corpus motif n-grams and cadence
 intervals, which were previously trained but unused, now shape phrase identity
@@ -109,7 +117,11 @@ repetitive quotation. Lead and counterpoint are planned as a pair in one random
 domain. Counter onsets are moved before its motif cursor advances, so discarded
 collisions can no longer punch holes in the heard motif; contrary and oblique
 responses are preferred while both voices retain independent rhythm, register,
-resolution pressure and roughness constraints. Non-chord tones may cross an
+resolution pressure and roughness constraints. A counterpoint window is now
+planned only for the interval in which it can sound; silent pre-entry events no
+longer consume motif phase or random draws. Corpus IOIs are stored in quarter-
+note units and converted to dotted-quarter transport beats in 6/8 before metric
+conditioning. Non-chord tones may cross an
 ordinary harmony change, with strong resolution pressure reserved for the true
 phrase cadence.
 
@@ -122,6 +134,26 @@ pitches are chosen, counterpoint is reconciled against actual overlapping note
 durations to correct voice crossing, accented vertical dissonance and parallel
 perfect motion.
 
+Concrete MIDI realization is no longer greedy at each harmony window. A
+deterministic sixteen-path beam decoder sees the entire phrase and scores corpus
+surprisal, motif pitch-class identity, harmony and metric role, register arc,
+an anticipated unique climax, cadence arrival, repeated notes, leap recovery,
+the harmony/melody surprise budget, bass spacing and concrete counterpoint.
+Climax and cadence are future positional constraints, not wishes that a local
+sampler may later miss. The selected pitches are stored in the phrase plan and
+the real-time scheduler only renders them; `pickMelodyMidi` remains a fallback
+for legacy or interaction-only events.
+
+The rhythm layer now emits near-connected notated gates and leaves the final
+articulation to the instrument-performance layer. This removes the former
+double shortening that turned a nominally lyrical line into detached single
+notes. Motif breaths use a small metric vocabulary instead of an arbitrary
+continuous range. Phrase openings are bounded, ordinary motion has a seven-
+semitone ceiling, and a leap of a fourth or larger creates strong contrary
+stepwise recovery pressure on the following note. Randomness therefore chooses
+motif and phrase identity; it no longer gets equal authority over every local
+melodic connection.
+
 ### Orchestration and digital synthesis
 
 A scene change could previously redraw the entire ensemble. Formal boundaries
@@ -130,20 +162,35 @@ two change in development or intensification. Instrument continuity is part of
 the sampling weight and lead/counter collision correction stays inside that
 budget.
 
+The orchestral target is informed by the long-form language represented in
+Apple Music's “澎湃管弦” collection: recognisable thematic material, sectional
+handoffs, sustained development, a structurally earned tutti and release. The
+implementation borrows that large-scale grammar, never any protected melody.
+Woodwind/solo lines, strings/choir beds, low strings and bassoon, and
+keyboard/plucked motion remain the phrase-bearing families. A separate horn,
+trumpet or trombone desk and timpani now enter only during intensification,
+high-tension development or cadential arrival, allowing the same seed to grow
+from chamber transparency into a complete orchestral peak.
+
 Instrument identity and instrument presence are separate decisions. Each
 phrase receives a texture plan spanning sparse, duo, chamber, full and release
 states. It controls active roles, spotlight, sustained chord-voice count, and
 minimum-duration entrances and exits. Counterpoint and accompaniment are
 phrase-level roles instead of per-chord coin flips. Harmony may genuinely drop
-to zero for an exposed solo, while intensification can reach a bounded five- or
-six-voice chord without making that density the default.
+to zero for an exposed solo, while intensification can reach a bounded five-
+voice chord without making that density the default. Adjacent phrase plans must
+share at least one sounding role, so a new density arc enters by hand-off rather
+than replacing the whole ensemble at the bar line.
 
 Accompaniment uses retained or deliberately varied meter-specific sustain,
 pulse, arpeggio, syncopated and sparse patterns. Every onset remains quantized
 to the shared transport subdivision; rhythmic variety does not reintroduce an
-independent clock.
+independent clock. Pattern `voicingOffset` is now the sole arpeggio voice path;
+changing chord degree no longer rotates that path a second time. Delay taps are
+one-half and one-and-a-half transport beats and follow gradual tempo movement,
+rather than remaining at unrelated fixed millisecond values.
 
-Performance is resolved per note and per concrete instrument. All seventeen
+Performance is resolved per note and per concrete instrument. All twenty
 recipes declare a physical gesture family, playable legato behavior, breath or
 bow capacity, natural or sustained decay, and duration-dependent vibrato onset.
 Only instruments that explicitly permit portamento can glide between pitches;
@@ -151,6 +198,21 @@ struck and plucked instruments rearticulate and decay, while winds and strings
 insert bounded breath or bow changes at phrase roles. Pickup, statement,
 continuation, climax, cadence and echo roles shape local dynamics and
 articulation without adding random timing jitter.
+
+Gain staging follows orchestral function rather than applying one generic
+spotlight multiplier. The lead remains the reference plane; counterpoint and
+rhythmic accompaniment yield while it is present, bass retains a stable
+foundation, and upper harmony is equal-power normalized against its sounding
+voice count. Per-instrument perceptual trims compensate for the extra projection
+of bright transient sources such as celesta, violin, oboe, harp, pizzicato and
+marimba after waveform normalization. Dense harmony uses one shared bow/breath
+noise layer instead of one noise source per chord pitch, preventing source-
+budget pressure from deleting arbitrary chord members.
+
+The source allocator reserves six slots while upper harmony is scheduled, then
+allows structural bass, cadential brass and percussion to use the full cap.
+The integrated audit now constrains drop rates for every role instead of proving
+only that lead and counterpoint survived.
 
 The oscillator model is no longer only a static harmonic array. Periodic waves
 are cached by instrument morph and pitch bucket, high partials are attenuated
@@ -236,13 +298,17 @@ covers, among other checks:
 - motif identity, real-onset corpus conditioning, melodic singability,
   contrary/oblique counterpoint, cadence and resolution quality, roughness and
   parallel-motion limits;
+- 2,048 independently scored A/A′/B/A″ phrase realizations, each using whole-
+  phrase beam search, with corpus surprisal, motif retention, strong-beat
+  harmony, leap recovery, unique climax, complete planned MIDI, deterministic
+  replay and cross-seed trace-collision gates;
 - non-root bass coverage, pedal/stepwise motion, a seven-semitone bass-leap cap,
   phrase recurrence, and unstable-triad limits;
 - deterministic independent random domains and all three visual variants;
 - deterministic platform quality plans, an SMAA fallback when MSAA is
   unavailable, and recovery bounded by the platform ceiling;
 - 512 complete multi-seed emotional journeys with bright/high-tempo coverage;
-- all seventeen instruments, idiomatic connection/decay/breath/vibrato plans,
+- all twenty instruments, idiomatic connection/decay/breath/vibrato plans,
   sparse/duo/chamber/full/release coverage, phrase-persistent entrances, five
   accompaniment families, equal-power hand-offs, and fourteen noise/transient
   recipes;
@@ -254,6 +320,11 @@ non-zero output, no limiter overload, no scheduler recovery, no WebGL context
 loss, pulse agreement between audio and renderer, desktop/mobile screenshots,
 and reachable semantic controls. It does not claim loudspeaker, headphone or
 psychoacoustic listener-panel acceptance.
+
+These metrics are regression guardrails, not a claim that a scalar score proves
+beauty. Release-quality comparison still requires loudness-matched, same-seed
+blind A/B listening on melody memorability, harmonic naturalness, rhythmic
+life, form, tension/release, timbre comfort and willingness to keep listening.
 
 ## Research basis
 
@@ -273,6 +344,26 @@ psychoacoustic listener-panel acceptance.
   — interpretable oscillator, filter, noise and performance hierarchies.
 - [Learning the Long-Term Structure of the Blues](https://research.google/pubs/learning-the-long-term-structure-of-the-blues/)
   — the gap between locally plausible notes and coherent long-range form.
+- [Music Transformer](https://research.google/pubs/music-transformer-generating-music-with-long-term-structure/)
+  and [MusicVAE](https://proceedings.mlr.press/v80/roberts18a.html) — repetition,
+  relative musical position and hierarchical decoding for long-range identity.
+- [DeepBach](https://proceedings.mlr.press/v70/hadjeres17a.html),
+  [COCONET](https://research.google/pubs/counterpoint-by-convolution/) and
+  [Anticipation-RNN](https://arxiv.org/abs/1709.06404) — positional constraints,
+  non-greedy rewriting and conditioning on future musical anchors.
+- [MeloForm](https://archives.ismir.net/ismir2022/paper/000068.pdf) and
+  [Theme Transformer](https://arxiv.org/abs/2111.04093) — expert form first,
+  learned/local refinement second, with recognisable thematic transformation.
+- [REMI / Pop Music Transformer](https://arxiv.org/abs/2002.00212) — explicit
+  bar, position, tempo and harmony in the event representation.
+- [GrooVAE](https://proceedings.mlr.press/v97/gillick19a.html) — separate
+  quantized composition from correlated performance timing and dynamics.
+- [What is missing in deep music generation?](https://archives.ismir.net/ismir2022/paper/000079.pdf)
+  — multilevel repetition and structure cannot be replaced by collection-level
+  pitch and rhythm statistics.
+- [Measure by Measure](https://transactions.ismir.net/articles/10.5334/tismir.163)
+  — hierarchical symbolic generation and the limits of objective musicality
+  metrics.
 - [Learning Latent Representations of Music to Generate Interactive Musical Palettes](https://research.google/pubs/learning-latent-representations-of-music-to-generate-interactive-musical-palettes/)
   — continuous, constrained interactive exploration.
 - [TISMIR: perceptual timbre controls](https://transactions.ismir.net/articles/10.5334/tismir.76)

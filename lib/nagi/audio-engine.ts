@@ -6,7 +6,7 @@ import {
   chooseChordSpanBars,
   chooseNeighborScene,
   clamp,
-  degreeTension,
+  degreeTensionForScene,
   deriveSeedNumber,
   emotionalFormFromSeed,
   emotionalFormEmotionAt,
@@ -57,6 +57,7 @@ import {
 } from './phrase-melody';
 import {
   INSTRUMENTS,
+  INSTRUMENT_OUTPUT_TRIM,
   articulationName,
   chooseOrchestration,
   choosePerformancePlan,
@@ -109,6 +110,8 @@ export type NagiDiagnostics = {
   barPhase: number;
   bass: number;
   bassInstrument: string;
+  brassActive: boolean;
+  brassInstrument: string;
   beat: number;
   beatPhase: number;
   bpm: number;
@@ -144,6 +147,8 @@ export type NagiDiagnostics = {
   outputRms: number;
   orchestrationTransition: number;
   pulse: number;
+  percussionActive: boolean;
+  percussionInstrument: string;
   scheduledEvents: number;
   schedulerRecoveries: number;
   transition: number;
@@ -199,8 +204,10 @@ const SCHEDULER_INTERVAL_MS = 120;
 const SCHEDULE_HORIZON_SECONDS = 3.2;
 const MAX_SOURCE_OVERLAP = 40;
 const NOISE_SOURCE_OVERLAP_LIMIT = 30;
-const HARMONY_OVERLAP_LIMIT = 32;
-const BASS_OVERLAP_LIMIT = 34;
+// Leave a small reservation for bass, cadential brass and percussion, which
+// are scheduled after the sustained upper harmony layer.
+const HARMONY_OVERLAP_LIMIT = 34;
+const BASS_OVERLAP_LIMIT = MAX_SOURCE_OVERLAP;
 const DUAL_TIMBRE_OVERLAP_LIMIT = 34;
 const ACCOMPANIMENT_OVERLAP_LIMIT = 36;
 export const DEFAULT_VOLUME = 0.72;
@@ -231,6 +238,8 @@ export class NagiAudioEngine {
   };
   private accompanimentPulseEvents = 0;
   private bassContinuousGestureSeconds = 0;
+  private brassActive = false;
+  private brassContinuousGestureSeconds = 0;
   private chordDegree = 0;
   private bassLinePlan!: BassLinePlan;
   private barsUntilSceneChange = 0;
@@ -244,6 +253,8 @@ export class NagiAudioEngine {
   private currentArousal: number;
   private currentValence: number;
   private counterpointPairState: CounterpointPairState | null = null;
+  private delayA?: DelayNode;
+  private delayB?: DelayNode;
   private dry?: GainNode;
   private effectsBus?: GainNode;
   private emotionalForm: EmotionalFormPlan;
@@ -270,6 +281,8 @@ export class NagiAudioEngine {
   private lastBassMidi = 46;
   private lastEmotionAt = 0;
   private lastMelodyMidi = 69;
+  private lastLeadInterval = 0;
+  private lastCounterInterval = 0;
   private counterContinuousGestureSeconds = 0;
   private lastSnapshotAt = -Infinity;
   private lastTickWall = 0;
@@ -294,6 +307,7 @@ export class NagiAudioEngine {
   private performanceFrom: PerformancePlan;
   private performanceMix = 1;
   private performanceTarget: PerformancePlan;
+  private percussionActive = false;
   private phraseMelodyPlan!: PhraseMelodicPlan;
   private phraseOrdinal = 0;
   private phraseTexturePlan!: PhraseTexturePlan;
@@ -305,6 +319,7 @@ export class NagiAudioEngine {
   private previousAccompanimentPattern: AccompanimentPattern | null = null;
   private previousPhraseHarmonyPlan: PhraseHarmonicPlan | null = null;
   private previousPhraseMelodyPlan: PhraseMelodicPlan | null = null;
+  private previousPhraseTexturePlan: PhraseTexturePlan | null = null;
   private atmosphereRandom!: SeededRandom;
   private harmonyRandom!: SeededRandom;
   private melodyRandom!: SeededRandom;
@@ -444,8 +459,10 @@ export class NagiAudioEngine {
         harmonyEvents: this.phraseHarmonyPlan.events,
         phraseBars: scene.phraseBars,
         previousAccompanimentPattern: this.previousAccompanimentPattern,
+        previousTexturePlan: this.previousPhraseTexturePlan,
       },
     );
+    this.previousPhraseTexturePlan = this.phraseTexturePlan;
     this.previousAccompanimentPattern = this.phraseTexturePlan.accompanimentPattern;
     const counterSegments = this.phraseTexturePlan.segments.filter((segment) =>
       segment.activeRoles.includes('counter')
@@ -461,6 +478,7 @@ export class NagiAudioEngine {
       this.leadMotif,
       this.counterMotif,
       {
+        bassLinePlan: this.bassLinePlan,
         counterEnabled: counterSegments.length > 0,
         counterEntryBar: counterSegments[0]?.startBar,
         counterExitBar: counterSegments.length > 0
@@ -469,6 +487,7 @@ export class NagiAudioEngine {
         formRole,
         harmonyPlan: this.phraseHarmonyPlan,
         openingReference: this.openingPhraseMelodyPlan ?? undefined,
+        previousCounterMidi: this.lastCounterMidi,
         previousLeadMidi: this.lastMelodyMidi,
         previousPhrase: previousPhrase ?? undefined,
       },
@@ -526,10 +545,11 @@ export class NagiAudioEngine {
     this.wet = context.createGain();
     this.wet.gain.value = 0.22;
 
-    const delayA = context.createDelay(2);
-    const delayB = context.createDelay(2);
-    delayA.delayTime.value = 0.37;
-    delayB.delayTime.value = 0.61;
+    this.delayA = context.createDelay(2);
+    this.delayB = context.createDelay(2);
+    const openingBeatSeconds = 60 / this.transportTempo;
+    this.delayA.delayTime.value = clamp(openingBeatSeconds * 0.5, 0.18, 0.9);
+    this.delayB.delayTime.value = clamp(openingBeatSeconds * 1.5, 0.48, 1.8);
     const delayLevelA = context.createGain();
     const delayLevelB = context.createGain();
     delayLevelA.gain.value = 0.07;
@@ -566,10 +586,10 @@ export class NagiAudioEngine {
     this.harmonyBus.connect(this.sourceBus);
     this.melodyBus.connect(this.effectsBus);
     this.effectsBus.connect(this.sourceBus);
-    this.effectsBus.connect(delayA);
-    this.effectsBus.connect(delayB);
-    delayA.connect(delayLevelA);
-    delayB.connect(delayLevelB);
+    this.effectsBus.connect(this.delayA);
+    this.effectsBus.connect(this.delayB);
+    this.delayA.connect(delayLevelA);
+    this.delayB.connect(delayLevelB);
     delayLevelA.connect(delayPanA);
     delayLevelB.connect(delayPanB);
     delayPanA.connect(this.sourceBus);
@@ -808,6 +828,8 @@ export class NagiAudioEngine {
       barPhase: transport.barPhase,
       bass: this.bands.bass,
       bassInstrument: this.getTimbre('bass').label,
+      brassActive: this.brassActive,
+      brassInstrument: this.getTimbre('brass').label,
       beat: transport.beat + transport.beatPhase,
       beatPhase: transport.beatPhase,
       bpm: transport.bpm,
@@ -846,6 +868,8 @@ export class NagiAudioEngine {
       outputRms: this.outputRms,
       orchestrationTransition: this.orchestrationMix,
       pulse: transport.pulse,
+      percussionActive: this.percussionActive,
+      percussionInstrument: this.getTimbre('percussion').label,
       scheduledEvents: this.scheduledEvents,
       schedulerRecoveries: this.schedulerRecoveries,
       transition: snapshot.transition,
@@ -965,7 +989,7 @@ export class NagiAudioEngine {
         phrase: 0,
         pulse: 0,
         sceneName: sceneName(this.harmonicScene),
-        tension: degreeTension(this.chordDegree),
+        tension: degreeTensionForScene(this.harmonicScene, this.chordDegree),
       };
     }
     const meter = METERS[segment.meterIndex];
@@ -1067,6 +1091,17 @@ export class NagiAudioEngine {
     );
     this.dry.gain.setTargetAtTime(Math.sqrt(1 - reverbMix) * 0.92, now, 2.4);
     this.wet.gain.setTargetAtTime(Math.sqrt(reverbMix) * 0.48, now, 2.4);
+    const beatSeconds = 60 / Math.max(1, this.transportTempo);
+    this.delayA?.delayTime.setTargetAtTime(
+      clamp(beatSeconds * 0.5, 0.18, 0.9),
+      now,
+      0.65,
+    );
+    this.delayB?.delayTime.setTargetAtTime(
+      clamp(beatSeconds * 1.5, 0.48, 1.8),
+      now,
+      0.65,
+    );
     this.globalPanner.pan.setTargetAtTime((this.interactionX - 0.5) * 0.16, now, 0.45);
   }
 
@@ -1174,6 +1209,7 @@ export class NagiAudioEngine {
 
   private sourceOverlapLimitForRole(role: keyof OrchestrationPlan) {
     if (role === 'harmony') return HARMONY_OVERLAP_LIMIT;
+    if (role === 'brass') return BASS_OVERLAP_LIMIT;
     if (role === 'bass') return BASS_OVERLAP_LIMIT;
     if (role === 'accompaniment') return ACCOMPANIMENT_OVERLAP_LIMIT;
     return MAX_SOURCE_OVERLAP;
@@ -1196,7 +1232,12 @@ export class NagiAudioEngine {
       }
       const wave = this.getWaveForInstrument(instrument, midi);
       return wave
-        ? [{ instrument, level: 1, recipe: INSTRUMENTS[instrument], wave }]
+        ? [{
+            instrument,
+            level: INSTRUMENT_OUTPUT_TRIM[instrument],
+            recipe: INSTRUMENTS[instrument],
+            wave,
+          }]
         : [];
     };
     if (
@@ -1218,13 +1259,15 @@ export class NagiAudioEngine {
     return [
       {
         instrument: from,
-        level: Math.cos(mix * Math.PI * 0.5),
+        level:
+          Math.cos(mix * Math.PI * 0.5) * INSTRUMENT_OUTPUT_TRIM[from],
         recipe: INSTRUMENTS[from],
         wave: fromWave,
       },
       {
         instrument: to,
-        level: Math.sin(mix * Math.PI * 0.5),
+        level:
+          Math.sin(mix * Math.PI * 0.5) * INSTRUMENT_OUTPUT_TRIM[to],
         recipe: INSTRUMENTS[to],
         wave: toWave,
       },
@@ -1233,8 +1276,51 @@ export class NagiAudioEngine {
 
   private textureRoleGain(role: TextureRole) {
     if (!this.activeTextureRoles.includes(role)) return 0;
-    if (this.textureSpotlight === role) return 1.12;
-    return this.activeTextureRoles.length >= 4 ? 0.88 : 0.96;
+    const leadActive = this.activeTextureRoles.includes('lead');
+    const counterActive = this.activeTextureRoles.includes('counter');
+    const harmonyActive = this.activeTextureRoles.includes('harmony');
+    const activeRoleCount = this.activeTextureRoles.length;
+    let gain = 1;
+    if (role === 'counter') {
+      gain = leadActive ? 0.9 : 1;
+    } else if (role === 'harmony') {
+      const upperVoiceCount = Math.max(
+        1,
+        this.soundingChordVoices - Number(this.activeTextureRoles.includes('bass')),
+      );
+      // Equal-power normalization: denser harmony gains colour, not a sudden
+      // loudness jump. Two upper voices are the reference orchestral weight.
+      gain = clamp(Math.sqrt(2 / upperVoiceCount), 0.68, 1.08);
+      if (leadActive && counterActive) gain *= 0.88;
+      else if (leadActive) gain *= 0.95;
+    } else if (role === 'bass') {
+      gain = harmonyActive ? 0.94 : 1.04;
+    } else if (role === 'accompaniment') {
+      gain = leadActive ? 0.82 : 0.94;
+      if (counterActive) gain *= 0.9;
+      if (
+        this.phraseTexturePlan?.accompanimentPattern.id === 'arpeggio' ||
+        this.phraseTexturePlan?.accompanimentPattern.id === 'syncopated'
+      ) gain *= 0.9;
+    }
+    if (
+      activeRoleCount >= 4 &&
+      role !== 'lead' &&
+      role !== 'bass'
+    ) gain *= 0.92;
+    if (this.textureSpotlight === role) {
+      gain *= role === 'lead' ? 1.06 : 1.08;
+    }
+    return clamp(gain, 0.58, 1.1);
+  }
+
+  private orchestralSectionGain(role: 'brass' | 'percussion') {
+    const leadActive = this.activeTextureRoles.includes('lead');
+    if (role === 'brass') {
+      const densityTrim = this.activeTextureRoles.length >= 4 ? 0.88 : 1;
+      return densityTrim * (leadActive ? 0.82 : 0.94);
+    }
+    return (leadActive ? 0.78 : 0.9) * (this.textureState === 'full' ? 1 : 0.86);
   }
 
   private getWave(role: keyof OrchestrationPlan, midi = 60) {
@@ -1256,6 +1342,9 @@ export class NagiAudioEngine {
     }
     if (this.orchestrationTarget.bass !== this.orchestrationFrom.bass) {
       this.bassContinuousGestureSeconds = 0;
+    }
+    if (this.orchestrationTarget.brass !== this.orchestrationFrom.brass) {
+      this.brassContinuousGestureSeconds = 0;
     }
     if (this.orchestrationTarget.lead !== this.orchestrationFrom.lead) {
       this.leadContinuousGestureSeconds = 0;
@@ -1464,6 +1553,29 @@ export class NagiAudioEngine {
     const bassActive = activeRoles.includes('bass');
     const harmonyActive = activeRoles.includes('harmony');
     const accompanimentActive = activeRoles.includes('accompaniment');
+    const formalStage = emotionalFormStageAt(
+      this.emotionalForm,
+      this.formSceneIndex,
+    );
+    this.brassActive = harmonyActive && (
+      this.textureState === 'full' ||
+      (
+        formalStage.id === 'intensification' &&
+        (phraseHarmonyEvent?.tensionTarget ?? sceneForChord.tension) >= 0.52
+      ) ||
+      Boolean(
+        phraseHarmonyEvent?.cadential &&
+        sceneForChord.arousal >= 0.64 &&
+        sceneForChord.tension >= 0.42
+      )
+    );
+    this.percussionActive = (
+      this.textureState === 'full' ||
+      formalStage.id === 'intensification'
+    ) && Boolean(
+      phraseHarmonyEvent?.cadential ||
+      (phraseHarmonyEvent?.tensionTarget ?? 0) >= 0.68
+    );
     const upperHarmonyVoiceCount = harmonyActive
       ? Math.max(1, (textureSegment?.totalChordVoices ?? 3) - (bassActive ? 1 : 0))
       : 0;
@@ -1517,9 +1629,9 @@ export class NagiAudioEngine {
       tension: phraseHarmonyEvent
         ? clamp(
             phraseHarmonyEvent.tensionTarget * 0.62 +
-              degreeTension(this.chordDegree) * 0.38,
+              degreeTensionForScene(sceneForChord, this.chordDegree) * 0.38,
           )
-        : degreeTension(this.chordDegree),
+        : degreeTensionForScene(sceneForChord, this.chordDegree),
       tempo: sceneForChord.tempo,
     });
 
@@ -1596,6 +1708,45 @@ export class NagiAudioEngine {
     } else {
       this.bassContinuousGestureSeconds = 0;
     }
+    if (this.brassActive) {
+      const upperVoicing = this.currentVoicing.slice(1);
+      const brassVoiceCount = this.textureState === 'full' &&
+          phraseHarmonyEvent?.cadential
+        ? 2
+        : 1;
+      upperVoicing.slice(-brassVoiceCount).forEach((midi, index) => {
+        const instrument = this.getInstrument('brass');
+        const registerMidi = instrument === 'trombone' && midi > 67
+          ? midi - 12
+          : instrument === 'trumpet' && midi < 60
+            ? midi + 12
+            : midi;
+        this.scheduleBrassVoice(
+          start,
+          Math.min(duration * 0.88, barSeconds * 1.5),
+          registerMidi,
+          index,
+          profile,
+          phraseProgress,
+          Boolean(phraseHarmonyEvent?.cadential),
+        );
+      });
+    } else {
+      this.brassContinuousGestureSeconds = 0;
+    }
+    if (this.percussionActive) {
+      const percussionBars = phraseHarmonyEvent?.cadential
+        ? Math.min(2, spanBars)
+        : 1;
+      for (let bar = 0; bar < percussionBars; bar += 1) {
+        this.scheduleTimpani(
+          start + bar * barSeconds,
+          bassMidi,
+          profile,
+          bar === 0 ? 1 : 0.72,
+        );
+      }
+    }
     if (accompanimentActive) {
       this.scheduleAccompaniment(
         start,
@@ -1662,8 +1813,12 @@ export class NagiAudioEngine {
       ? Math.min(recipe.release, gesture.decay.naturalDecaySeconds)
       : recipe.release;
     const release = Math.min(
-      2.7,
-      Math.max(0.42, idiomaticRelease * gesture.decay.releaseScale),
+      3.2,
+      Math.max(
+        0.42,
+        idiomaticRelease * gesture.decay.releaseScale,
+        duration - sustainDuration + 0.18,
+      ),
     );
     const end = performanceStart + sustainDuration + release;
     const peak =
@@ -1720,16 +1875,21 @@ export class NagiAudioEngine {
       sourceStart,
       sourceEnd,
     );
-    this.scheduleTimbreNoise(
-      performanceStart,
-      Math.min(sustainDuration + release, 3.2),
-      midi,
-      peak,
-      recipe,
-      'harmony',
-      panner.pan.value,
-      profile,
-    );
+    // A chord bed needs one shared bow/breath texture, not a separate noise
+    // source for every pitch. The latter consumed the overlap budget and made
+    // later chord voices disappear unpredictably in dense passages.
+    if (index === 0) {
+      this.scheduleTimbreNoise(
+        performanceStart,
+        Math.min(sustainDuration + release, 3.2),
+        midi,
+        peak,
+        recipe,
+        'harmony',
+        panner.pan.value,
+        profile,
+      );
+    }
     this.scheduledEvents += 1;
   }
 
@@ -1863,6 +2023,185 @@ export class NagiAudioEngine {
     this.scheduledEvents += 1;
   }
 
+  private scheduleBrassVoice(
+    start: number,
+    duration: number,
+    midi: number,
+    index: number,
+    profile: WeatherProfile,
+    phraseProgress: number,
+    cadential: boolean,
+  ) {
+    if (!this.context || !this.harmonyBus) return;
+    const context = this.context;
+    const recipe = this.getTimbre('brass');
+    const expressionState = this.getPerformancePlan().harmony;
+    const instrument = this.getInstrument('brass');
+    const gesture = planNoteGesture({
+      connectionRandom: this.textureRandom.next(),
+      continuousGestureSeconds: this.brassContinuousGestureSeconds,
+      durationSeconds: duration,
+      expression: expressionState,
+      instrument,
+      intervalSemitones: 0,
+      legatoRequested: this.brassContinuousGestureSeconds > 0,
+      metricStrength: cadential ? 0.94 : 0.74,
+      phraseProgress,
+      phraseRole: cadential ? 'cadence' : 'continuation',
+      variation: this.textureRandom.between(-0.015, 0.015),
+    });
+    this.brassContinuousGestureSeconds = gesture.boundary.continuousSecondsAfter;
+    const performanceStart = start + gesture.boundary.breakBeforeSeconds;
+    const body = Math.max(0.3, duration * (0.78 + gesture.articulation * 0.18));
+    const release = Math.min(1.45, recipe.release * gesture.decay.releaseScale);
+    const end = performanceStart + body + release;
+    const sourceStart = Math.max(context.currentTime + 0.001, performanceStart - 0.008);
+    const sourceEnd = end + 0.025;
+    const toneLayers = this.getToneLayers('brass', midi, sourceStart, sourceEnd);
+    if (toneLayers.length === 0) return;
+    const toneMixer = context.createGain();
+    const oscillators = toneLayers.map((layer) => {
+      const oscillator = context.createOscillator();
+      const layerGain = context.createGain();
+      oscillator.setPeriodicWave(layer.wave);
+      oscillator.frequency.setValueAtTime(midiToFrequency(midi), performanceStart);
+      layerGain.gain.value = layer.level;
+      oscillator.connect(layerGain);
+      layerGain.connect(toneMixer);
+      return { layer, layerGain, oscillator };
+    });
+    const filter = context.createBiquadFilter();
+    filter.type = 'lowpass';
+    const cutoff = (1350 + profile.brightness * 1850) *
+      (0.72 + recipe.brightness * 0.54);
+    filter.frequency.setValueAtTime(cutoff * 0.78, performanceStart);
+    filter.frequency.exponentialRampToValueAtTime(
+      cutoff,
+      performanceStart + Math.min(body * 0.56, 0.72),
+    );
+    filter.Q.value = 0.32;
+    const envelope = context.createGain();
+    const panner = context.createStereoPanner();
+    panner.pan.value = (index === 0 ? -0.12 : 0.12) * profile.spread;
+    const peak =
+      (cadential ? 0.0088 : 0.0068) *
+      gesture.dynamic *
+      this.orchestralSectionGain('brass');
+    const attack = Math.min(0.34, Math.max(0.045, recipe.attack * gesture.attackScale));
+    envelope.gain.setValueAtTime(0, Math.max(0, performanceStart - 0.008));
+    envelope.gain.setValueAtTime(0, performanceStart);
+    envelope.gain.linearRampToValueAtTime(peak, performanceStart + attack);
+    envelope.gain.setValueAtTime(peak * 0.86, performanceStart + body * 0.72);
+    envelope.gain.exponentialRampToValueAtTime(0.00001, end - 0.006);
+    envelope.gain.linearRampToValueAtTime(0, end);
+    const detune = this.textureRandom.between(-1.1, 1.1);
+    oscillators.forEach(({ layer, oscillator }) => {
+      this.scheduleVibrato(
+        oscillator.detune,
+        performanceStart,
+        body,
+        layer.recipe,
+        expressionState,
+        detune,
+        gesture.vibrato,
+      );
+    });
+    toneMixer.connect(filter);
+    filter.connect(envelope);
+    envelope.connect(panner);
+    panner.connect(this.harmonyBus);
+    oscillators.forEach(({ oscillator }) => {
+      oscillator.start(sourceStart);
+      oscillator.stop(sourceEnd);
+    });
+    this.trackSourceGroup(
+      oscillators.map(({ oscillator }) => oscillator),
+      [toneMixer, ...oscillators.map(({ layerGain }) => layerGain), filter, envelope, panner],
+      sourceStart,
+      sourceEnd,
+    );
+    if (index === 0) {
+      this.scheduleTimbreNoise(
+        performanceStart,
+        Math.min(body + release, 1.8),
+        midi,
+        peak,
+        recipe,
+        'brass',
+        panner.pan.value,
+        profile,
+      );
+    }
+    this.scheduledEvents += 1;
+  }
+
+  private scheduleTimpani(
+    start: number,
+    bassMidi: number,
+    profile: WeatherProfile,
+    accent: number,
+  ) {
+    if (!this.context || !this.harmonyBus) return;
+    const context = this.context;
+    const midi = clamp(bassMidi - 7, 36, 48);
+    const duration = 1.15 + profile.space * 0.55;
+    const sourceStart = Math.max(context.currentTime + 0.001, start - 0.008);
+    const sourceEnd = start + duration + 0.025;
+    const toneLayers = this.getToneLayers('percussion', midi, sourceStart, sourceEnd);
+    if (toneLayers.length === 0) return;
+    const toneMixer = context.createGain();
+    const oscillators = toneLayers.map((layer) => {
+      const oscillator = context.createOscillator();
+      const layerGain = context.createGain();
+      oscillator.setPeriodicWave(layer.wave);
+      const frequency = midiToFrequency(midi);
+      oscillator.frequency.setValueAtTime(frequency * 1.035, start);
+      oscillator.frequency.exponentialRampToValueAtTime(frequency, start + 0.11);
+      layerGain.gain.value = layer.level;
+      oscillator.connect(layerGain);
+      layerGain.connect(toneMixer);
+      return { layerGain, oscillator };
+    });
+    const filter = context.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 260 + profile.warmth * 170;
+    filter.Q.value = 0.58;
+    const envelope = context.createGain();
+    const peak =
+      0.0135 *
+      accent *
+      this.orchestralSectionGain('percussion');
+    envelope.gain.setValueAtTime(0, Math.max(0, start - 0.008));
+    envelope.gain.setValueAtTime(0, start);
+    envelope.gain.linearRampToValueAtTime(peak, start + 0.012);
+    envelope.gain.exponentialRampToValueAtTime(0.00001, start + duration - 0.006);
+    envelope.gain.linearRampToValueAtTime(0, start + duration);
+    toneMixer.connect(filter);
+    filter.connect(envelope);
+    envelope.connect(this.harmonyBus);
+    oscillators.forEach(({ oscillator }) => {
+      oscillator.start(sourceStart);
+      oscillator.stop(sourceEnd);
+    });
+    this.trackSourceGroup(
+      oscillators.map(({ oscillator }) => oscillator),
+      [toneMixer, ...oscillators.map(({ layerGain }) => layerGain), filter, envelope],
+      sourceStart,
+      sourceEnd,
+    );
+    this.scheduleTimbreNoise(
+      start,
+      duration,
+      midi,
+      peak,
+      this.getTimbre('percussion'),
+      'percussion',
+      0,
+      profile,
+    );
+    this.scheduledEvents += 1;
+  }
+
   private scheduleMelodicVoices(
     start: number,
     beatSeconds: number,
@@ -1907,6 +2246,8 @@ export class NagiAudioEngine {
     let localCounterNeedsResolution = this.counterNeedsResolution;
     let localLeadResolutionDirection = this.leadResolutionDirection;
     let localLeadResolutionMaximumStep = this.leadResolutionMaximumStep;
+    let localLeadInterval = this.lastLeadInterval;
+    let localCounterInterval = this.lastCounterInterval;
     const harmonyNotes = activeRoles.includes('harmony')
       ? this.currentVoicing.slice(1)
       : [];
@@ -1947,7 +2288,9 @@ export class NagiAudioEngine {
       const targetPitchClass = event.retainPreviousPitch
         ? ((previous % 12) + 12) % 12
         : motifPitchClass(scene, event.motifDegree);
-      const midi = pickMelodyMidi(
+      const phraseOpening = role === 'lead' &&
+        event.phraseBeat === this.phraseMelodyPlan.leadEvents[0]?.phraseBeat;
+      const midi = event.plannedMidi ?? pickMelodyMidi(
         scene,
         this.chordDegree,
         previous,
@@ -1962,7 +2305,9 @@ export class NagiAudioEngine {
           direction,
           maximumInterval: role === 'lead' && mustResolve
             ? localLeadResolutionMaximumStep || 2
-            : undefined,
+            : phraseOpening
+              ? 5
+              : 7,
           metricStrength: event.metricStrength,
           mustResolve: mustResolve || cadenceArrival,
           otherVoiceMidi: role === 'counter'
@@ -1970,6 +2315,9 @@ export class NagiAudioEngine {
             : counterEvents.length > 0
               ? localCounterMidi
               : undefined,
+          previousInterval: role === 'lead'
+            ? localLeadInterval
+            : localCounterInterval,
           registerHigh: role === 'lead'
             ? this.phraseMelodyPlan.registerArc.leadHighMidi
             : this.phraseMelodyPlan.registerArc.counterHighMidi,
@@ -1983,6 +2331,7 @@ export class NagiAudioEngine {
       );
       const chordTone = isChordTone(scene, this.chordDegree, midi);
       if (role === 'lead') {
+        localLeadInterval = midi - previous;
         localLeadMidi = midi;
         localLeadNeedsResolution = !chordTone || event.mustResolveNext;
         if (event.mustResolveNext) {
@@ -1993,6 +2342,7 @@ export class NagiAudioEngine {
           localLeadResolutionMaximumStep = 0;
         }
       } else {
+        localCounterInterval = midi - previous;
         localCounterMidi = midi;
         localCounterNeedsResolution = !chordTone || event.mustResolveNext;
       }
@@ -2063,6 +2413,7 @@ export class NagiAudioEngine {
       if (!scheduled) continue;
       if (item.role === 'lead') {
         this.leadNoteEvents += 1;
+        this.lastLeadInterval = midi - soundingPrevious;
         this.lastMelodyMidi = midi;
         scheduledLeadPrevious = midi;
         this.leadNeedsResolution =
@@ -2075,6 +2426,7 @@ export class NagiAudioEngine {
           : 0;
       } else {
         this.counterNoteEvents += 1;
+        this.lastCounterInterval = midi - soundingPrevious;
         this.lastCounterMidi = midi;
         scheduledCounterPrevious = midi;
         this.counterNeedsResolution =
@@ -2103,9 +2455,10 @@ export class NagiAudioEngine {
       spanBars,
     );
     for (const [eventIndex, event] of events.entries()) {
-      const noteIndex = (
-        event.voicingOffset + this.chordDegree
-      ) % accompanimentVoicing.length;
+      // voicingOffset already describes the arpeggio's voice path. Rotating it
+      // again by scale degree made every chord change jump to a different desk
+      // and broke otherwise smooth voice leading.
+      const noteIndex = event.voicingOffset % accompanimentVoicing.length;
       let midi = accompanimentVoicing[noteIndex];
       if (midi > 74) midi -= 12;
       const absolutePhraseBeat = this.phraseBar * meter.beatsPerBar + event.beatOffset;
@@ -2266,7 +2619,8 @@ export class NagiAudioEngine {
       instrument,
       intervalSemitones: midi - previousMidi,
       legatoRequested:
-        continuousGestureSeconds > 0 && expressionState.articulation > 0.94,
+        continuousGestureSeconds > 0 &&
+        expressionState.articulation > (role === 'lead' ? 0.7 : 0.76),
       metricStrength,
       phraseProgress,
       phraseRole,
