@@ -1,0 +1,12 @@
+.nagi-shell[data-wallpaper='true'] {
+  cursor: default;
+}
+
+.nagi-shell[data-show-title='false'] .nagi-center,
+.nagi-shell[data-show-controls='false'] .nagi-controls-area {
+  display: none;
+}
+
+.nagi-shell[data-wallpaper='true'] .nagi-enter:disabled {
+  visibility: hidden;
+}

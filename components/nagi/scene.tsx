@@ -1,6 +1,16 @@
 'use client';
 
-import { Sparkles } from '@react-three/drei';
+import {
+  BACKDROP_VERTEX_SHADER,
+  BACKDROP_FRAGMENT_SHADER,
+  CORE_VERTEX_SHADER,
+  CORE_FRAGMENT_SHADER,
+  SHELL_VERTEX_SHADER,
+  SHELL_FRAGMENT_SHADER,
+  PARTICLE_VERTEX_SHADER,
+  PARTICLE_FRAGMENT_SHADER,
+} from '../../lib/nagi/shaders';
+import { Points } from '@react-three/drei';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import {
   Bloom,
@@ -9,36 +19,26 @@ import {
   Noise,
   Vignette,
 } from '@react-three/postprocessing';
-import { BlendFunction } from 'postprocessing';
+import { BlendFunction, type BloomEffect } from 'postprocessing';
 import { type RefObject, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import {
   type AudioBands,
   type NagiAudioEngine,
-} from '../lib/nagi/audio-engine';
+} from '../../lib/nagi/audio-engine';
 import {
   CORE_EMOTIONS,
+  SeededRandom,
   seedToNumber,
   visualVariantFromSeed,
   type EmotionName,
   type SeedSnapshot,
-} from '../lib/nagi/generative';
+} from '../../lib/nagi/generative';
 import {
   EMOTION_COLOR_PALETTES,
   EMOTION_SHADER_TEMPLATES,
-} from '../lib/nagi/visual-presets';
-
-export type NagiPointerField = {
-  down: number;
-  lastAt: number;
-  lastX: number;
-  lastY: number;
-  targetEnergy: number;
-  targetX: number;
-  targetY: number;
-  x: number;
-  y: number;
-};
+} from '../../lib/nagi/visual-presets';
+import { advancePointer, type NagiPointerField } from '../../lib/nagi/pointer-field';
 
 export type NagiRendererDiagnostics = {
   antialias: boolean;
@@ -50,6 +50,14 @@ export type NagiRendererDiagnostics = {
   frames: number;
   maxFrameGapMs: number;
   pointerEnergy: number;
+  motion?: {
+    backdrop: number;
+    coreRibbon: number;
+    coreBand: number;
+    particles: number;
+    particleCount: number;
+    particleGeometry?: number;
+  };
   pulse: number;
   quality: number;
   styleName: string;
@@ -58,6 +66,8 @@ export type NagiRendererDiagnostics = {
 };
 
 type NagiSceneProps = {
+  frameRate?: number;
+  paused?: boolean;
   diagnosticsRef: RefObject<HTMLOutputElement | null>;
   engineRef: RefObject<NagiAudioEngine | null>;
   pointerRef: RefObject<NagiPointerField>;
@@ -67,263 +77,8 @@ type NagiSceneProps = {
 
 type InnerSceneProps = NagiSceneProps & {
   audioRef: RefObject<AudioBands>;
+  snapshotRef: RefObject<SeedSnapshot>;
 };
-
-const BACKDROP_VERTEX_SHADER = `
-varying vec3 vDirection;
-void main() {
-  vDirection = normalize(position);
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-}
-`;
-
-const BACKDROP_FRAGMENT_SHADER = `
-precision highp float;
-uniform float uTime;
-uniform float uSeed;
-uniform vec2 uEmotion;
-uniform vec3 uPointer;
-uniform vec3 uColorA;
-uniform vec3 uColorB;
-uniform vec3 uColorC;
-uniform vec4 uPatternA;
-uniform vec4 uPatternB;
-uniform vec4 uPatternC;
-uniform vec4 uPatternParams;
-uniform vec4 uTransport;
-varying vec3 vDirection;
-
-float hash31(vec3 p) {
-  p = fract(p * 0.1031);
-  p += dot(p, p.yzx + 33.33);
-  return fract((p.x + p.y) * p.z);
-}
-
-float noise3(vec3 p) {
-  vec3 i = floor(p);
-  vec3 f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(
-    mix(mix(hash31(i), hash31(i + vec3(1,0,0)), f.x),
-        mix(hash31(i + vec3(0,1,0)), hash31(i + vec3(1,1,0)), f.x), f.y),
-    mix(mix(hash31(i + vec3(0,0,1)), hash31(i + vec3(1,0,1)), f.x),
-        mix(hash31(i + vec3(0,1,1)), hash31(i + vec3(1,1,1)), f.x), f.y),
-    f.z
-  );
-}
-
-float fbm(vec3 p) {
-  float value = 0.0;
-  float amplitude = 0.52;
-  for (int i = 0; i < 4; i++) {
-    value += noise3(p) * amplitude;
-    p = p * 2.03 + vec3(1.7, 2.9, 1.1);
-    amplitude *= 0.48;
-  }
-  return value;
-}
-
-void main() {
-  vec3 d = normalize(vDirection);
-  float arousal = uEmotion.x;
-  float valence = uEmotion.y;
-  float slowTime = uTime * mix(0.018, 0.075, arousal) * uPatternParams.y;
-  vec3 q = d * uPatternParams.x;
-  float mist = fbm(q * mix(2.2, 4.8, arousal) + vec3(slowTime, -slowTime * 0.7, uSeed * 8.0));
-  float tide = 0.5 + 0.5 * sin(d.y * 5.0 + mist * 3.2 - slowTime * 3.0);
-  float longitude = atan(d.z, d.x);
-  float auroraWave = 0.5 + 0.5 * sin(
-    longitude * 2.6 + d.y * 7.0 + mist * 5.2 + slowTime * 4.0
-  );
-  float aurora = smoothstep(
-    mix(0.68, 0.52, arousal),
-    mix(0.94, 0.84, arousal),
-    auroraWave
-  ) * (0.52 + mist * 0.48);
-  float crystalSignal = abs(sin(
-    (abs(d.x) + abs(d.y * 1.3) + abs(d.z * 0.8)) * 21.0 + mist * 3.4
-  ));
-  float crystal = smoothstep(0.82, 0.985, crystalSignal);
-  float halo = pow(max(0.0, 1.0 - abs(length(d.xy) - 0.72 - mist * 0.12)), 7.0);
-  float lagoon = 0.5 + 0.5 * sin((d.x + d.z) * 8.0 + mist * 4.0 - slowTime * 2.0);
-  float rays = smoothstep(
-    0.68,
-    0.97,
-    0.5 + 0.5 * sin(longitude * 7.0 + mist * 2.0 + slowTime)
-  );
-  float bloom = smoothstep(
-    0.38,
-    0.96,
-    max(0.0, sin(longitude * 3.0 + d.y * 5.0 + slowTime * 1.6))
-  );
-  float storm = fbm(d * 8.0 + vec3(-slowTime * 2.0, slowTime, uSeed * 15.0));
-  float lattice = smoothstep(
-    0.84,
-    0.985,
-    abs(sin((d.x - d.z) * 28.0 + storm * 5.0))
-  );
-  float ribbon = smoothstep(
-    0.58,
-    0.98,
-    0.5 + 0.5 * sin(longitude * 5.0 + d.y * 9.0 + mist * 3.0 + slowTime * 2.0)
-  );
-  float vortex = 0.5 + 0.5 * sin(longitude * 4.0 + length(d.xy) * 13.0 - slowTime * 1.4 + mist * 4.0);
-  float sparkleNoise = hash31(floor(d * 82.0 + uSeed * 19.0));
-  float sparkleDrift = 0.72 + 0.28 * sin(
-    slowTime * 7.0 + sparkleNoise * 18.0 + uTransport.y * 6.2831853
-  );
-  float sparkleCells = smoothstep(0.965, 0.997, sparkleNoise) * sparkleDrift;
-  vec4 patternsA = vec4(mist * 0.58 + tide * 0.42, halo, lagoon, aurora);
-  vec4 patternsB = vec4(rays, bloom, crystal, storm);
-  vec4 patternsC = vec4(lattice, ribbon, vortex, sparkleCells);
-  float field = dot(uPatternA, patternsA) + dot(uPatternB, patternsB) + dot(uPatternC, patternsC);
-  field = smoothstep(0.08, max(0.34, 1.08 - uPatternParams.z * 0.38), field);
-  vec3 color = mix(uColorA, uColorB, clamp(mist * 0.32 + field * 0.68, 0.0, 1.0));
-  color *= 0.48 + field * 0.58 + mist * 0.12;
-  color += uColorC * field * (0.08 + valence * 0.13);
-  float starNoise = hash31(floor(d * 180.0 + uSeed * 37.0));
-  float stars = smoothstep(0.982, 0.999, starNoise);
-  float twinkle = 0.5 + 0.5 * sin(uTransport.y * 6.2831853 + starNoise * 21.0);
-  float flowingLight = 0.5 + 0.5 * sin(
-    longitude * 3.0 + mist * 4.0 + uTransport.z * 6.2831853
-  );
-  color += uColorC * stars * (0.006 + twinkle * 0.018 + uTransport.x * 0.006) * uPatternParams.w;
-  color += uColorB * flowingLight * (0.005 + valence * 0.006);
-  float pointerGlow = pow(max(dot(d, normalize(vec3(uPointer.xy, 0.7))), 0.0), 18.0);
-  color += uColorC * pointerGlow * uPointer.z * 0.24;
-  color *= 0.7 + max(d.y, -0.25) * 0.12;
-  gl_FragColor = vec4(max(color, vec3(0.002, 0.003, 0.007)), 1.0);
-}
-`;
-
-const CORE_VERTEX_SHADER = `
-uniform float uTime;
-uniform float uSeed;
-uniform float uShape;
-uniform vec4 uPointer;
-uniform vec2 uEmotion;
-varying vec3 vNormalWorld;
-varying vec3 vPosition;
-varying vec3 vWorldPosition;
-varying float vDisplacement;
-
-float layeredField(vec3 p) {
-  float a = sin(p.x * 2.8 + uTime * 0.31 + uSeed * 17.0);
-  float b = sin(p.y * 3.7 - uTime * 0.23 + uSeed * 9.0);
-  float c = sin(p.z * 4.3 + uTime * 0.17 - uSeed * 13.0);
-  float d = sin(dot(p, normalize(vec3(1.0, 1.7, 2.3))) * 5.1 - uTime * 0.19);
-  return (a * b + b * c + c * d) / 3.0;
-}
-
-void main() {
-  vec3 transformed = position;
-  float arousal = uEmotion.x;
-  float valence = uEmotion.y;
-  float tideField = layeredField(position);
-  float ribbonField = sin(
-    atan(position.y, position.x) * 3.0 + position.z * 5.0 - uTime * (0.12 + arousal * 0.2)
-  ) * 0.72;
-  float facetField = abs(sin(
-    (abs(position.x) + abs(position.y * 1.35) + abs(position.z * 0.82)) * 8.0
-    + uTime * 0.08
-  )) - 0.48;
-  float energetic = smoothstep(0.28, 0.76, arousal);
-  float crystalline = smoothstep(0.62, 0.92, arousal) * (0.55 + (1.0 - valence) * 0.45);
-  float field = mix(tideField, ribbonField, energetic);
-  field = mix(field, facetField, crystalline * 0.72);
-  float fine = sin(
-    (position.x + position.y - position.z) * mix(9.0, 17.0, arousal) + uTime * 0.24
-  ) * mix(0.018, 0.036, arousal);
-  float interaction = uPointer.z;
-  float cursorFacing = max(dot(normalize(position.xy + vec2(0.0001)), normalize(uPointer.xy + vec2(0.0001))), 0.0);
-  float displacement = field * mix(0.1, 0.3, uShape) * mix(0.72, 1.2, arousal)
-    + fine * (0.45 + uShape);
-  displacement += interaction * cursorFacing * 0.055;
-  transformed += vec3(
-    sin(position.y * 2.7 + uTime * 0.13),
-    sin(position.z * 3.1 - uTime * 0.11),
-    cos(position.x * 2.9 + uTime * 0.09)
-  ) * (0.018 + uShape * 0.025);
-  transformed += normal * displacement;
-  transformed.xy += uPointer.xy * (0.018 + (position.z + 1.0) * 0.018);
-
-  vec4 world = modelMatrix * vec4(transformed, 1.0);
-  vNormalWorld = normalize(mat3(modelMatrix) * normal);
-  vPosition = transformed;
-  vWorldPosition = world.xyz;
-  vDisplacement = displacement;
-  gl_Position = projectionMatrix * viewMatrix * world;
-}
-`;
-
-const CORE_FRAGMENT_SHADER = `
-precision highp float;
-uniform float uTime;
-uniform float uSeed;
-uniform float uSparkle;
-uniform float uTension;
-uniform vec2 uEmotion;
-uniform vec3 uColorA;
-uniform vec3 uColorB;
-uniform vec3 uColorC;
-varying vec3 vNormalWorld;
-varying vec3 vPosition;
-varying vec3 vWorldPosition;
-varying float vDisplacement;
-
-void main() {
-  vec3 normal = normalize(vNormalWorld);
-  vec3 viewDirection = normalize(cameraPosition - vWorldPosition);
-  float fresnel = pow(1.0 - max(dot(normal, viewDirection), 0.0), 2.4);
-  vec3 lightDirection = normalize(vec3(-0.55, 0.72, 0.48));
-  float diffuse = max(dot(normal, lightDirection), 0.0);
-  float opposite = max(dot(normal, normalize(vec3(0.72, -0.35, 0.4))), 0.0);
-  float band = 0.5 + 0.5 * sin(
-    vPosition.y * (7.0 + uSparkle * 9.0 + uEmotion.x * 6.0)
-    + uTime * (0.14 + uEmotion.x * 0.12) + uSeed * 23.0
-  );
-  float caustic = pow(band, 7.0) * (0.08 + uSparkle * 0.24);
-  float slowInterference = sin(uTime * 0.07 + uSeed * 11.0);
-  float interference = 0.5 + 0.5 * sin(
-    (vPosition.x - vPosition.z) * 9.0 - uTime * 0.12 + slowInterference * 0.18
-  );
-  vec3 color = mix(uColorA, uColorB, diffuse * 0.64 + opposite * 0.2 + band * 0.15);
-  color = mix(color, uColorC, fresnel * (0.58 + uSparkle * 0.25));
-  color += uColorC * (caustic + pow(max(diffuse, 0.0), 10.0) * 0.4);
-  color += mix(uColorA, uColorC, interference) * vDisplacement * 0.45;
-  color += uColorC * (uEmotion.y * 0.025 + uEmotion.x * fresnel * 0.04);
-  color = mix(color, color * vec3(1.04, 0.98, 1.08), uTension * 0.08);
-  color = mix(color, color * mix(vec3(0.9, 0.82, 1.18), vec3(1.12, 1.04, 0.82), uEmotion.y), uEmotion.x * 0.16);
-  float alpha = 0.9 + fresnel * 0.1;
-  gl_FragColor = vec4(max(color, 0.0) * 0.72, alpha);
-}
-`;
-
-const SHELL_VERTEX_SHADER = `
-uniform float uTime;
-varying vec3 vNormalWorld;
-varying vec3 vWorldPosition;
-void main() {
-  vec3 transformed = position + normal * sin(position.y * 6.0 + uTime * 0.22) * 0.022;
-  vec4 world = modelMatrix * vec4(transformed, 1.0);
-  vNormalWorld = normalize(mat3(modelMatrix) * normal);
-  vWorldPosition = world.xyz;
-  gl_Position = projectionMatrix * viewMatrix * world;
-}
-`;
-
-const SHELL_FRAGMENT_SHADER = `
-precision highp float;
-uniform vec3 uColor;
-uniform float uOpacity;
-varying vec3 vNormalWorld;
-varying vec3 vWorldPosition;
-void main() {
-  vec3 viewDirection = normalize(cameraPosition - vWorldPosition);
-  float fresnel = pow(1.0 - max(dot(normalize(vNormalWorld), viewDirection), 0.0), 3.2);
-  gl_FragColor = vec4(uColor * (0.28 + fresnel * 1.6), fresnel * uOpacity);
-}
-`;
 
 type PaletteSet = {
   a: THREE.Color;
@@ -410,9 +165,8 @@ function shaderState(emotion: EmotionName, seed: string) {
   };
 }
 
-function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
+function EmotionBackdrop({ audioRef, pointerRef, snapshotRef, rendererRef }: InnerSceneProps) {
   const materialRef = useRef<THREE.ShaderMaterial>(null);
-  const seedValue = seedToNumber(seedSnapshot.currentSeed) / 4294967295;
   const colorTarget = useMemo(() => palette(), []);
   const blendedStyles = useMemo(
     () => ({
@@ -423,22 +177,11 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
     }),
     [],
   );
-  const styleTargets = useMemo(() => {
-    const current = seedSnapshot.currentSeed;
-    const incoming = seedSnapshot.incomingSeed ?? current;
-    return {
-      current: shaderState(seedSnapshot.emotion, current),
-      incoming: shaderState(
-        seedSnapshot.incomingEmotion ?? seedSnapshot.emotion,
-        incoming,
-      ),
-    };
-  }, [
-    seedSnapshot.currentSeed,
-    seedSnapshot.emotion,
-    seedSnapshot.incomingEmotion,
-    seedSnapshot.incomingSeed,
-  ]);
+  const stylesRef = useRef<{
+    key: string;
+    current: ReturnType<typeof shaderState>;
+    incoming: ReturnType<typeof shaderState>;
+  } | null>(null);
   const uniforms = useMemo(
     () => ({
       uColorA: { value: new THREE.Color('#071326') },
@@ -451,15 +194,28 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
       uPatternParams: { value: new THREE.Vector4(1, 0.6, 0.75, 0.3) },
       uPointer: { value: new THREE.Vector3() },
       uSeed: { value: 0 },
-      uTime: { value: 0 },
+      uDrift: { value: 0 },
       uTransport: { value: new THREE.Vector4() },
     }),
     [],
   );
 
-  useFrame((state, delta) => {
+  useFrame((_state, elapsed) => {
     const material = materialRef.current;
     if (!material) return;
+    const delta = Math.min(elapsed, 0.1);
+    const seedSnapshot = snapshotRef.current;
+    const seedValue = seedToNumber(seedSnapshot.currentSeed) / 4294967295;
+    const styleKey = `${seedSnapshot.currentSeed}:${seedSnapshot.incomingSeed}:${seedSnapshot.emotion}:${seedSnapshot.incomingEmotion}`;
+    if (stylesRef.current?.key !== styleKey) {
+      stylesRef.current = {
+        key: styleKey,
+        current: shaderState(seedSnapshot.emotion, seedSnapshot.currentSeed),
+        incoming: shaderState(seedSnapshot.incomingEmotion ?? seedSnapshot.emotion,
+          seedSnapshot.incomingSeed ?? seedSnapshot.currentSeed),
+      };
+    }
+    const styleTargets = stylesRef.current;
     const audio = audioRef.current;
     const pointer = pointerRef.current;
     const targetSeed = seedSnapshot.incomingSeed
@@ -469,7 +225,6 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
           seedSnapshot.transition,
         )
       : seedValue;
-    material.uniforms.uTime.value = state.clock.elapsedTime;
     material.uniforms.uSeed.value = THREE.MathUtils.lerp(
       material.uniforms.uSeed.value,
       targetSeed,
@@ -488,7 +243,7 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
     material.uniforms.uPointer.value.set(
       pointer.x * 2 - 1,
       1 - pointer.y * 2,
-      pointer.targetEnergy,
+      pointer.energy,
     );
     setEmotionPalette(
       colorTarget,
@@ -516,6 +271,10 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
     material.uniforms.uPatternB.value.lerp(blendedStyles.b, styleEase);
     material.uniforms.uPatternC.value.lerp(blendedStyles.c, styleEase);
     material.uniforms.uPatternParams.value.lerp(blendedStyles.params, styleEase);
+    material.uniforms.uDrift.value += delta *
+      THREE.MathUtils.lerp(0.018, 0.075, material.uniforms.uEmotion.value.x) *
+      material.uniforms.uPatternParams.value.y;
+    if (rendererRef.current.motion) rendererRef.current.motion.backdrop = material.uniforms.uDrift.value;
     material.uniforms.uTransport.value.set(
       audio.pulse,
       audio.beatPhase,
@@ -540,13 +299,14 @@ function EmotionBackdrop({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps
   );
 }
 
-function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
+function DreamCore({ audioRef, pointerRef, snapshotRef, rendererRef }: InnerSceneProps) {
   const coreRef = useRef<THREE.Mesh>(null);
   const shellRef = useRef<THREE.Mesh>(null);
   const coreMaterialRef = useRef<THREE.ShaderMaterial>(null);
   const shellMaterialRef = useRef<THREE.ShaderMaterial>(null);
-  const seedValue = seedToNumber(seedSnapshot.currentSeed) / 4294967295;
   const colors = useMemo(() => palette(), []);
+  const targetScale = useMemo(() => new THREE.Vector3(), []);
+  const touchPosition = useMemo(() => new THREE.Vector3(), []);
   const coreUniforms = useMemo(
     () => ({
       uColorA: { value: new THREE.Color('#102b3a') },
@@ -554,11 +314,14 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
       uColorC: { value: new THREE.Color('#d4dbe8') },
       uEmotion: { value: new THREE.Vector2() },
       uPointer: { value: new THREE.Vector4() },
+      uTouch: { value: new THREE.Vector2() },
       uSeed: { value: 0 },
       uShape: { value: 0.5 },
       uSparkle: { value: 0.5 },
       uTension: { value: 0 },
       uTime: { value: 0 },
+      uRibbonPhase: { value: 0 },
+      uBandPhase: { value: 0 },
     }),
     [],
   );
@@ -566,17 +329,22 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
     () => ({
       uColor: { value: new THREE.Color('#d4dbe8') },
       uOpacity: { value: 0.16 },
+      uPointer: { value: new THREE.Vector4() },
+      uTouch: { value: new THREE.Vector2() },
       uTime: { value: 0 },
     }),
     [],
   );
 
-  useFrame((state, delta) => {
+  useFrame((state, elapsed) => {
     const core = coreRef.current;
     const shell = shellRef.current;
     const material = coreMaterialRef.current;
     const shellMaterial = shellMaterialRef.current;
     if (!core || !shell || !material || !shellMaterial) return;
+    const delta = Math.min(elapsed, 0.1);
+    const seedSnapshot = snapshotRef.current;
+    const seedValue = seedToNumber(seedSnapshot.currentSeed) / 4294967295;
     const audio = audioRef.current;
     const pointer = pointerRef.current;
     const targetSeed = seedSnapshot.incomingSeed
@@ -586,7 +354,7 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
           seedSnapshot.transition,
         )
       : seedValue;
-    material.uniforms.uTime.value = state.clock.elapsedTime;
+    material.uniforms.uTime.value += delta;
     material.uniforms.uSeed.value = THREE.MathUtils.lerp(
       material.uniforms.uSeed.value,
       targetSeed,
@@ -602,14 +370,27 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
       seedSnapshot.profile.sparkle,
       1 - Math.exp(-delta * 0.8),
     );
-    material.uniforms.uEmotion.value.set(audio.arousal, audio.valence);
+    const emotionEase = 1 - Math.exp(-delta * 1.2);
+    material.uniforms.uEmotion.value.x = THREE.MathUtils.lerp(material.uniforms.uEmotion.value.x, audio.arousal, emotionEase);
+    material.uniforms.uEmotion.value.y = THREE.MathUtils.lerp(material.uniforms.uEmotion.value.y, audio.valence, emotionEase);
+    material.uniforms.uRibbonPhase.value += delta * (0.12 + material.uniforms.uEmotion.value.x * 0.2);
+    material.uniforms.uBandPhase.value += delta * (0.14 + material.uniforms.uEmotion.value.x * 0.12);
+    if (rendererRef.current.motion) {
+      rendererRef.current.motion.coreRibbon = material.uniforms.uRibbonPhase.value;
+      rendererRef.current.motion.coreBand = material.uniforms.uBandPhase.value;
+    }
     material.uniforms.uTension.value = audio.tension;
     material.uniforms.uPointer.value.set(
       pointer.x * 2 - 1,
       1 - pointer.y * 2,
-      pointer.targetEnergy,
-      pointer.down,
+      pointer.energy,
+      pointer.pressure,
     );
+    // 将指针投到主体所在的世界平面，按压位置不随主体自转而漂移。
+    touchPosition.set(pointer.x * 2 - 1, 1 - pointer.y * 2, 0.5).unproject(state.camera);
+    touchPosition.sub(state.camera.position);
+    touchPosition.multiplyScalar(-state.camera.position.z / touchPosition.z).add(state.camera.position);
+    material.uniforms.uTouch.value.set(touchPosition.x, touchPosition.y);
     setEmotionPalette(
       colors,
       seedSnapshot.emotion,
@@ -625,12 +406,14 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
     material.uniforms.uColorB.value.lerp(colors.b, 1 - Math.exp(-delta * 0.7));
     material.uniforms.uColorC.value.lerp(colors.c, 1 - Math.exp(-delta * 0.7));
 
-    shellMaterial.uniforms.uTime.value = state.clock.elapsedTime;
+    shellMaterial.uniforms.uTime.value = material.uniforms.uTime.value;
     shellMaterial.uniforms.uColor.value.lerp(colors.c, 1 - Math.exp(-delta * 0.7));
     shellMaterial.uniforms.uOpacity.value = 0.12 + seedSnapshot.profile.depth * 0.12;
+    shellMaterial.uniforms.uPointer.value.copy(material.uniforms.uPointer.value);
+    shellMaterial.uniforms.uTouch.value.copy(material.uniforms.uTouch.value);
 
     const shape = seedSnapshot.profile.shape;
-    const targetScale = new THREE.Vector3(
+    targetScale.set(
       0.92 + shape * 0.14 + audio.arousal * 0.13,
       1.08 - shape * 0.1 - audio.arousal * 0.08,
       0.9 + seedSnapshot.profile.depth * 0.1 + audio.valence * 0.08,
@@ -640,8 +423,9 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
       .copy(core.scale)
       .multiplyScalar(1.045);
     core.rotation.y += delta * (0.035 + seedSnapshot.profile.motion * 0.05);
-    core.rotation.x = THREE.MathUtils.lerp(core.rotation.x, (pointer.y - 0.5) * 0.16, 0.025);
-    core.rotation.z = THREE.MathUtils.lerp(core.rotation.z, (pointer.x - 0.5) * -0.12, 0.025);
+    const tiltEase = 1 - Math.exp(-delta * 1.2);
+    core.rotation.x = THREE.MathUtils.lerp(core.rotation.x, (pointer.y - 0.5) * 0.09, tiltEase);
+    core.rotation.z = THREE.MathUtils.lerp(core.rotation.z, (pointer.x - 0.5) * -0.07, tiltEase);
     shell.rotation.copy(core.rotation);
   });
 
@@ -673,30 +457,17 @@ function DreamCore({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
   );
 }
 
-function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps) {
+function OrbitalDetails({ audioRef, pointerRef, seedSnapshot, snapshotRef }: InnerSceneProps) {
   const groupRef = useRef<THREE.Group>(null);
   const knotRef = useRef<THREE.Mesh>(null);
   const satellitesRef = useRef<THREE.Group>(null);
-  const color = useMemo(
-    () =>
-      palette(
-        seedSnapshot.emotion,
-        seedSnapshot.profile.harmonicHue,
-        seedSnapshot.profile.brightness,
-        0.34,
-        0.56,
-        seedToNumber(seedSnapshot.currentSeed) / 4294967295,
-      ).c,
-    [
-      seedSnapshot.currentSeed,
-      seedSnapshot.emotion,
-      seedSnapshot.profile.brightness,
-      seedSnapshot.profile.harmonicHue,
-    ],
-  );
+  const colors = useMemo(() => palette(), []);
+  const materials = useRef<Array<THREE.MeshBasicMaterial | null>>([]);
 
-  useFrame((state, delta) => {
+  useFrame((state, elapsed) => {
     if (!groupRef.current || !knotRef.current || !satellitesRef.current) return;
+    const delta = Math.min(elapsed, 0.1);
+    const seedSnapshot = snapshotRef.current;
     const pointer = pointerRef.current;
     const audio = audioRef.current;
     groupRef.current.rotation.x +=
@@ -705,15 +476,19 @@ function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps)
     groupRef.current.rotation.y = THREE.MathUtils.lerp(
       groupRef.current.rotation.y,
       (pointer.x - 0.5) * 0.28 + state.clock.elapsedTime * 0.012,
-      0.025,
+      1 - Math.exp(-delta * 1.2),
     );
     knotRef.current.rotation.y -=
       delta * (0.028 + seedSnapshot.profile.flow * 0.05 + audio.arousal * 0.09);
     knotRef.current.rotation.z += delta * 0.026;
     satellitesRef.current.rotation.y += delta * (0.06 + seedSnapshot.profile.motion * 0.09);
     satellitesRef.current.rotation.x = (pointer.y - 0.5) * 0.3;
-    satellitesRef.current.rotation.z =
-      state.clock.elapsedTime * (0.012 + seedSnapshot.profile.motion * 0.018);
+    satellitesRef.current.rotation.z +=
+      delta * (0.012 + seedSnapshot.profile.motion * 0.018);
+    setEmotionPalette(colors, seedSnapshot.emotion, seedSnapshot.incomingEmotion,
+      seedSnapshot.transition, seedSnapshot.profile.harmonicHue, seedSnapshot.profile.brightness,
+      audio.arousal, audio.valence, seedToNumber(seedSnapshot.currentSeed) / 4294967295);
+    for (const material of materials.current) material?.color.lerp(colors.c, 1 - Math.exp(-delta * 0.7));
     const moodScale = 0.82 + audio.arousal * 0.42 + audio.valence * 0.08;
     groupRef.current.scale.setScalar(
       THREE.MathUtils.lerp(
@@ -730,7 +505,8 @@ function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps)
         <mesh key={index} rotation={[Math.PI / 2 + index * 0.48, index * 0.72, index * 0.35]}>
           <torusGeometry args={[1.15 + index * 0.16, 0.0035 + index * 0.001, 8, 180]} />
           <meshBasicMaterial
-            color={color}
+            ref={(material) => { materials.current[index] = material; }}
+            color="#d4dbe8"
             transparent
             opacity={0.016 + seedSnapshot.profile.sparkle * 0.012}
             blending={THREE.AdditiveBlending}
@@ -741,7 +517,8 @@ function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps)
       <mesh ref={knotRef}>
         <torusKnotGeometry args={[1.24, 0.0035, 240, 8, 2, 3]} />
         <meshBasicMaterial
-          color={color}
+          ref={(material) => { materials.current[2] = material; }}
+          color="#d4dbe8"
           transparent
           opacity={0.012 + seedSnapshot.profile.flow * 0.012}
           blending={THREE.AdditiveBlending}
@@ -757,7 +534,8 @@ function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps)
           <mesh key={index} position={[x, y, z]}>
             <sphereGeometry args={[size, 20, 20]} />
             <meshBasicMaterial
-              color={color}
+              ref={(material) => { materials.current[index + 3] = material; }}
+              color="#d4dbe8"
               transparent
               opacity={0.5}
               blending={THREE.AdditiveBlending}
@@ -769,8 +547,59 @@ function OrbitalDetails({ audioRef, pointerRef, seedSnapshot }: InnerSceneProps)
   );
 }
 
+function AmbientParticles({ audioRef, snapshotRef, rendererRef }: Pick<InnerSceneProps,
+  'audioRef' | 'snapshotRef' | 'rendererRef'>) {
+  const pointsRef = useRef<THREE.Points>(null);
+  const materialRef = useRef<THREE.ShaderMaterial>(null);
+  const colors = useMemo(() => palette(), []);
+  // 保留粒子身份；位置仍随连续相位和 Seed 漂移，密度以透明度过渡。
+  const positions = useMemo(() => {
+    const random = new SeededRandom('4E414749').fork('ambient-particles');
+    return Float32Array.from({ length: 180 * 3 }, (_, index) =>
+      (random.next() - 0.5) * [5.8, 4, 4.2][index % 3]);
+  }, []);
+  const uniforms = useMemo(() => ({
+    uPhase: { value: 0 }, uSeed: { value: 0 }, uDensity: { value: 0.75 },
+    uSize: { value: 0.8 }, uOpacity: { value: 0.3 }, uPixelRatio: { value: 1 },
+    uColor: { value: new THREE.Color('#d4dbe8') },
+  }), []);
+  useFrame((state, elapsed) => {
+    const material = materialRef.current;
+    if (!material) return;
+    const delta = Math.min(elapsed, 0.1);
+    const snapshot = snapshotRef.current;
+    const profile = snapshot.profile;
+    const audio = audioRef.current;
+    const seed = THREE.MathUtils.lerp(seedToNumber(snapshot.currentSeed),
+      seedToNumber(snapshot.incomingSeed ?? snapshot.currentSeed), snapshot.transition) / 4294967295;
+    const ease = 1 - Math.exp(-delta * 0.8);
+    material.uniforms.uPhase.value += delta * (0.055 + profile.motion * 0.08);
+    material.uniforms.uSeed.value = THREE.MathUtils.lerp(material.uniforms.uSeed.value, seed, ease);
+    material.uniforms.uDensity.value = THREE.MathUtils.lerp(material.uniforms.uDensity.value, 0.5 + profile.density * 0.5, ease);
+    material.uniforms.uSize.value = THREE.MathUtils.lerp(material.uniforms.uSize.value, 0.55 + profile.sparkle * 0.65, ease);
+    material.uniforms.uOpacity.value = THREE.MathUtils.lerp(material.uniforms.uOpacity.value, 0.22 + profile.sparkle * 0.2, ease);
+    material.uniforms.uPixelRatio.value = state.gl.getPixelRatio();
+    setEmotionPalette(colors, snapshot.emotion, snapshot.incomingEmotion, snapshot.transition,
+      profile.harmonicHue, profile.brightness, audio.arousal, audio.valence, seed);
+    material.uniforms.uColor.value.lerp(colors.c, ease);
+    if (rendererRef.current.motion) {
+      rendererRef.current.motion.particles = material.uniforms.uPhase.value;
+      rendererRef.current.motion.particleCount = positions.length / 3;
+      rendererRef.current.motion.particleGeometry = pointsRef.current?.geometry.id;
+    }
+  });
+  return (
+    <Points ref={pointsRef} positions={positions} frustumCulled={false}>
+      <shaderMaterial ref={materialRef} uniforms={uniforms}
+        vertexShader={PARTICLE_VERTEX_SHADER} fragmentShader={PARTICLE_FRAGMENT_SHADER}
+        transparent depthWrite={false} />
+    </Points>
+  );
+}
+
 function SceneController({
   audioRef,
+  snapshotRef,
   diagnosticsRef,
   engineRef,
   pointerRef,
@@ -794,7 +623,10 @@ function SceneController({
     return () => canvas.removeEventListener('webglcontextlost', handleContextLost);
   }, [gl, rendererRef]);
 
-  useFrame((state, delta) => {
+  useFrame((state, elapsed) => {
+    const delta = Math.min(elapsed, 0.1);
+    snapshotRef.current = engineRef.current?.getSnapshot() ?? seedSnapshot;
+    rendererRef.current.motion ??= { backdrop: 0, coreRibbon: 0, coreBand: 0, particles: 0, particleCount: 180 };
     if (!rendererRef.current.webgl) {
       rendererRef.current.webgl = true;
       rendererRef.current.antialias = gl.getContextAttributes()?.antialias ?? false;
@@ -802,7 +634,7 @@ function SceneController({
     rendererRef.current.quality = gl.getPixelRatio();
     rendererRef.current.maxFrameGapMs = Math.max(
       rendererRef.current.maxFrameGapMs,
-      Math.min(1000, delta * 1000),
+      Math.min(1000, elapsed * 1000),
     );
     const styleVariant = shaderVariantIndex(seedSnapshot.currentSeed);
     rendererRef.current.styleVariant =
@@ -810,9 +642,8 @@ function SceneController({
     rendererRef.current.styleName =
       EMOTION_SHADER_TEMPLATES[seedSnapshot.emotion][styleVariant].label;
     const pointer = pointerRef.current;
-    pointer.x += (pointer.targetX - pointer.x) * (1 - Math.exp(-delta * 4.8));
-    pointer.y += (pointer.targetY - pointer.y) * (1 - Math.exp(-delta * 4.8));
-    pointer.targetEnergy *= pointer.down > 0 ? 0.965 : 0.9;
+    advancePointer(pointer, delta);
+    rendererRef.current.pointerEnergy = pointer.energy;
     audioRef.current = engineRef.current?.readAudioBands() ?? {
       arousal: 0.16,
       barPhase: 0,
@@ -832,12 +663,13 @@ function SceneController({
 
     const mobile = state.size.width < 720;
     pointerTarget.set(
-      (pointer.x - 0.5) * (mobile ? 0.16 : 0.24),
-      (0.5 - pointer.y) * (mobile ? 0.1 : 0.15),
+      (pointer.x - 0.5) * (mobile ? 0.08 : 0.12),
+      (0.5 - pointer.y) * (mobile ? 0.05 : 0.075),
       mobile ? 8.4 : 4.9,
     );
     camera.position.lerp(pointerTarget, 1 - Math.exp(-delta * 1.7));
     camera.lookAt(0, 0, 0);
+    camera.updateMatrixWorld();
 
     if (lightRef.current && secondLightRef.current) {
       lightRef.current.position.x = -2.2 + (pointer.x - 0.5) * 1.2;
@@ -855,7 +687,6 @@ function SceneController({
     if (now - windowState.at >= 2200) {
       rendererRef.current.fps = Math.round((windowState.frames * 10000) / (now - windowState.at)) / 10;
       rendererRef.current.drawCalls = gl.info.render.calls;
-      rendererRef.current.pointerEnergy = pointer.targetEnergy;
       windowState.at = now;
       windowState.frames = 0;
     }
@@ -866,12 +697,13 @@ function SceneController({
       });
       diagnosticsAt.current = now;
     }
-  });
+  }, -1);
 
   return (
     <>
       <EmotionBackdrop
         audioRef={audioRef}
+        snapshotRef={snapshotRef}
         diagnosticsRef={diagnosticsRef}
         engineRef={engineRef}
         pointerRef={pointerRef}
@@ -883,6 +715,7 @@ function SceneController({
       <pointLight ref={secondLightRef} position={[2.4, -1.2, 1.8]} color="#c5a2ff" intensity={1.4} distance={7} />
       <DreamCore
         audioRef={audioRef}
+        snapshotRef={snapshotRef}
         diagnosticsRef={diagnosticsRef}
         engineRef={engineRef}
         pointerRef={pointerRef}
@@ -891,41 +724,31 @@ function SceneController({
       />
       <OrbitalDetails
         audioRef={audioRef}
+        snapshotRef={snapshotRef}
         diagnosticsRef={diagnosticsRef}
         engineRef={engineRef}
         pointerRef={pointerRef}
         rendererRef={rendererRef}
         seedSnapshot={seedSnapshot}
       />
-      <Sparkles
-        count={90 + Math.round(seedSnapshot.profile.density * 90)}
-        scale={[5.8, 4, 4.2]}
-        size={0.55 + seedSnapshot.profile.sparkle * 0.65}
-        speed={0.055 + seedSnapshot.profile.motion * 0.08}
-        opacity={0.22 + seedSnapshot.profile.sparkle * 0.2}
-        color={
-          palette(
-            seedSnapshot.emotion,
-            seedSnapshot.profile.harmonicHue,
-            seedSnapshot.profile.brightness,
-            0.34,
-            0.56,
-            seedToNumber(seedSnapshot.currentSeed) / 4294967295,
-          ).c
-        }
-        noise={1.2}
-      />
+      <AmbientParticles audioRef={audioRef} snapshotRef={snapshotRef} rendererRef={rendererRef} />
       <fog attach="fog" args={['#03050d', 4.4, 10]} />
     </>
   );
 }
 
-function PostEffects({ seedSnapshot }: { seedSnapshot: SeedSnapshot }) {
+function PostEffects({ snapshotRef }: { snapshotRef: RefObject<SeedSnapshot> }) {
+  const bloom = useRef<BloomEffect>(null);
+  useFrame((_state, delta) => {
+    if (bloom.current) bloom.current.intensity = THREE.MathUtils.lerp(bloom.current.intensity,
+      0.32 + snapshotRef.current.profile.sparkle * 0.2, 1 - Math.exp(-Math.min(delta, 0.1) * 0.8));
+  });
   const chromaticOffset = useMemo(() => new THREE.Vector2(0.00028, 0.00042), []);
   return (
     <EffectComposer multisampling={0} frameBufferType={THREE.UnsignedByteType}>
       <Bloom
-        intensity={0.32 + seedSnapshot.profile.sparkle * 0.2}
+        ref={bloom}
+        intensity={0.4}
         luminanceThreshold={0.52}
         luminanceSmoothing={0.68}
         mipmapBlur
@@ -942,7 +765,36 @@ function PostEffects({ seedSnapshot }: { seedSnapshot: SeedSnapshot }) {
   );
 }
 
+function FrameRateLimiter({ fps, paused }: { fps: number; paused: boolean }) {
+  const advance = useThree((state) => state.advance);
+  const elapsed = useRef(0);
+
+  useEffect(() => {
+    if (paused) return;
+    let frame = 0;
+    let last = performance.now();
+    let lastRender = last;
+    let accumulated = 0;
+    const interval = 1000 / fps;
+    const render = (now: number) => {
+      frame = requestAnimationFrame(render);
+      accumulated += Math.min(100, now - last);
+      last = now;
+      if (accumulated + 0.5 < interval) return;
+      elapsed.current += Math.min(1, (now - lastRender) / 1000);
+      lastRender = now;
+      accumulated = Math.max(0, accumulated - interval) % interval;
+      advance(elapsed.current);
+    };
+    frame = requestAnimationFrame(render);
+    return () => cancelAnimationFrame(frame);
+  }, [advance, fps, paused]);
+
+  return null;
+}
+
 export function NagiScene(props: NagiSceneProps) {
+  const snapshotRef = useRef(props.seedSnapshot);
   const audioRef = useRef<AudioBands>({
     arousal: 0.16,
     barPhase: 0,
@@ -976,6 +828,7 @@ export function NagiScene(props: NagiSceneProps) {
   return (
     <Canvas
       className="nagi-r3f"
+      frameloop={props.frameRate === undefined ? 'always' : 'never'}
       dpr={quality}
       camera={{ fov: 38, near: 0.1, far: 30, position: [0, 0, 4.9] }}
       gl={{
@@ -991,8 +844,11 @@ export function NagiScene(props: NagiSceneProps) {
         gl.toneMappingExposure = 0.82;
       }}
     >
-      <SceneController {...props} audioRef={audioRef} />
-      <PostEffects seedSnapshot={props.seedSnapshot} />
+      {props.frameRate !== undefined && (
+        <FrameRateLimiter fps={props.frameRate} paused={props.paused ?? false} />
+      )}
+      <SceneController {...props} audioRef={audioRef} snapshotRef={snapshotRef} />
+      <PostEffects snapshotRef={snapshotRef} />
     </Canvas>
   );
 }

@@ -1,50 +1,111 @@
 # NAGI（凪）
 
-> 一个一直存在、缓慢变化的声音与光的空间。
+> An endless, slowly evolving space of sound and light.
 
-“凪”指风停之后，海面安静下来的时刻。
+[Open NAGI in your browser](https://nagi.luyilabs.com/) · [简体中文](README.zh-CN.md) · [GitHub](https://github.com/tadazly/nagi)
 
-它并非绝对静止，而是一种仍有潮汐、呼吸与细微流动的平衡。NAGI 希望把这种状态变成一个可以长时间停留的数字空间：没有曲目列表，没有等待下一首，也没有必须完成的事情。
+NAGI is a generative ambient music experience built for the web. It creates music with the Web Audio API and a shared emotional world with Three.js: harmony, melody, timbre, color, and motion evolve together over time.
 
-## 不是播放，而是持续存在
+“凪” describes the calm after the wind settles. Here, calm still contains movement: a slow tide, a shift in light, a distant echo. There is no playlist to manage and no next track to wait for.
 
-NAGI 不是传统播放器，也不是把随机音符不断拼接起来的音乐工具。
+## Experience
 
-音乐会持续生长。和声、旋律、音色、疏密与空间感在不同的时间尺度上缓慢漂移，如同光线、云层与天气的自然变化。它没有明确的开头、高潮和结尾，也尽量不暴露段落边界。
+Click or tap anywhere to begin listening. Move the pointer to gently influence the space. In both the website and wallpaper, move near the bottom-right corner to reveal the toolbar: pause, mute, choose a new random Seed, or adjust the volume. It fades out when you move away. On a touchscreen, tap that corner to reveal it.
 
-偶然出现的声音不是主角，而是远处的回声、风中的微光，或水面上短暂扩散的涟漪。它们与音乐共同构成一个完整而克制的世界。
+Each eight-character hexadecimal Seed defines an initial emotion and a musical and visual identity. A new Seed blends into the current state. Music continues to develop through phrases and changing orchestration; the picture shares its mood without turning every foreground movement into a beat pulse.
 
-## 同一个世界，不同的天气
+You can start with a particular Seed using `?seed=7F3A91C2`. The same Seed determines the generative starting state; live interaction and playback timing still influence the experience.
 
-每一个 Seed 都代表 NAGI 当前的气候与倾向。
+## Run locally
 
-它可能让空间更温暖或更清冷，让和声更明亮或更朦胧，让声音更稀疏或更丰盈。但 Seed 不是曲目编号，也不会把音乐突然切换成另一首歌。
+Use **Node.js 22.13 or newer** and npm.
 
-当 Seed 改变，旧的状态不会消失。新的色彩会在很长的时间里逐渐渗入，像天气转向、潮水更替，直到回望时才发现空间已经悄然不同。
+```sh
+npm ci
+npm run dev
+```
 
-## 声音与光属于同一次呼吸
+Open the local URL printed by the development server. The browser needs WebGL 2 and Web Audio support; audio starts after a user gesture.
 
-画面不是附着在音乐表面的频谱展示，也不是为了炫耀反应速度的视觉效果。
+## Build and publish the website
 
-声音与光共享同一种情绪：低频牵动大尺度的明暗呼吸，高频唤起细小的闪烁与质感，和声改变空间的色彩，音乐的密度影响世界的深度与活跃程度。
+The website is the primary application, using Next.js App Router. Routes and metadata live in `app/`; website build settings live in `next.config.ts`.
 
-它们彼此回应，却不机械同步。听见的变化与看见的变化来自同一片天气。
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Start the Next.js development server. |
+| `npm run build` | Build the production website into `.next/`. |
+| `npm run start` | Serve the Next.js production build. |
+| `npm run build:static` | Export the website with Next.js into `out/` for static hosting. |
+| `npm run build:wallpaper` | Build an independent, offline Wallpaper Engine package. |
+| `npm run lint` | Check JavaScript and TypeScript style and common mistakes. |
+| `npm run typecheck` | Check TypeScript without emitting files. |
+| `npm run test:pointer` | Check damped pointer motion, pressure, release, and frame-rate consistency. |
+| `npm run test:soak` | Run the deterministic generative and visual regression audit. |
 
-## 触碰这片平静
+For Node.js hosting, run `npm run build` followed by `npm run start`. For static hosting, run `npm run build:static` and upload the contents of `out/`. Stop a development server before running standalone builds or type checks so generated framework files do not compete.
 
-点击或触摸任意位置，NAGI 才会苏醒。
+## Wallpaper Engine
 
-此后，鼠标与手指不是控制面板上的旋钮，而更像掠过水面的风。移动、停留与触碰会轻轻扰动声音和光，让空间感知到人的存在，同时保持整体的平静与连续。
+```sh
+npm run build:wallpaper
+```
 
-交互不会要求注意力，也不会把体验变成演奏。你可以靠近它，也可以什么都不做。
+The command produces `dist/wallpaper-engine/NAGI/`, `NAGI-Wallpaper-Engine.zip`, and an external SHA-256 checksum. Extract the ZIP and copy its `NAGI` folder into Wallpaper Engine's `projects/myprojects/`, or import `NAGI/index.html` in the wallpaper editor. Preserve the bundled `project.json` to keep its settings and links.
 
-## NAGI 坚持的原则
+This is a secondary entry to the same experience. It starts automatically, works offline, follows the host's frame limit and pause state, and exposes music, volume, Seed, title, and control visibility settings. The properties panel includes links to the project repository and the author's Steam profile.
 
-- 安静，但不空洞。
-- 丰富，但不过度表达。
-- 随机，但始终悦耳且属于同一个世界。
-- 变化，但不制造切换感。
-- 沉浸，但不索取持续操作。
-- 让连续性先于新奇，让氛围先于功能。
+The wallpaper toolbar reserves 80px below it for the desktop taskbar. Adjust **Toolbar bottom spacing** in the properties panel if needed. The GitHub link opens through Steam's external-link confirmation page.
 
-NAGI 最理想的状态，是在打开一段时间后逐渐被忘记，却仍然温柔地改变着房间。
+Only the seven runtime files are packaged. The project and dependency license notices are embedded in the JavaScript bundle; documentation, source maps, and development files are not included. The build uses standard production minification.
+
+[Wallpaper Engine import reference](https://docs.wallpaperengine.io/en/web/first/gettingstarted.html) · [Detailed import notes (中文)](docs/wallpaper-engine.md)
+
+## Project structure
+
+```text
+app/                         Website route, layout, metadata, and global style entry
+components/nagi/
+  experience.tsx             Shared playback controls, pointer input, and Seed UI
+  scene.tsx                  Three.js scene, camera, effects, and frame limiting
+lib/nagi/
+  audio-engine.ts            Web Audio graph, scheduling, synthesis, and diagnostics
+  generative.ts              Seed, emotion, harmony, and continuous transitions
+  composition.ts             Motifs, rhythm, and melodic development
+  performance.ts             Instrument choices, articulation, and orchestration
+  shaders.ts                 Background, core, and shell GLSL shaders
+  visual-presets.ts          Emotion palettes and shader templates
+  classical-*.ts / *.json    Musical themes and the compact corpus-derived prior
+  playback-settings.ts       Optional external playback settings
+  pointer-field.ts           Damped pointer motion and soft pressure/release
+styles/nagi.css              Shared visual styles
+wallpaper/                   Wallpaper entry, host bridge, properties, and styles
+scripts/                     Web/static/wallpaper builds, model training, and audits
+public/                      Website icon and social preview
+```
+
+The web route renders the shared experience without host settings. The wallpaper entry reads its host bridge and passes settings to that same component. The audio and generative modules do not depend on either publishing environment.
+
+## Contributing and remixing
+
+Fork the project, try a new sound or visual idea, and open an issue or pull request. Changes to synthesis belong in `audio-engine.ts`; changes to musical structure belong in `generative.ts`, `composition.ts`, or `performance.ts`; visual experiments can start in `shaders.ts` and `visual-presets.ts`.
+
+Please preserve smooth transitions, reproducible random domains, and restrained foreground movement. Run lint, type checks, the soak audit, and the build you changed. For shared UI changes, check both the website and wallpaper entry. The soak audit simulates 24 hours; it does not replace real listening, browser interaction, or device acceptance.
+
+[Architecture and musical design](docs/generative-architecture.md)
+
+## Acknowledgments
+
+NAGI is built on the following open-source projects. Thank you to their authors and contributors:
+
+- **Web:** [React](https://github.com/facebook/react) and [Next.js](https://github.com/vercel/next.js).
+- **Visuals:** [Three.js](https://github.com/mrdoob/three.js), [React Three Fiber](https://github.com/pmndrs/react-three-fiber), [Drei](https://github.com/pmndrs/drei), [React Postprocessing](https://github.com/pmndrs/react-postprocessing), and [Postprocessing](https://github.com/pmndrs/postprocessing).
+- **Music corpus:** [OpenScore Lieder Corpus](https://github.com/OpenScore/Lieder), used to train NAGI's classical melodic prior.
+
+See [package.json](package.json) for the full dependency list and [third-party notices](THIRD_PARTY_NOTICES.md) for attribution details.
+
+## License and author
+
+NAGI's original code is available under the [MIT License](LICENSE), copyright © 2026 [tadazly](https://github.com/tadazly). You are welcome to use, modify, redistribute, and build on it under those terms. Third-party components retain their own licenses and copyright notices.
+
+[Browser experience](https://nagi.luyilabs.com/) · [Source repository](https://github.com/tadazly/nagi) · [Author Steam](https://steamcommunity.com/id/tadazly/)

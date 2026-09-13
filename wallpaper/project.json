@@ -1,0 +1,87 @@
+{
+  "title": "NAGI（凪）",
+  "description": "An endless, slowly evolving space of sound and light.",
+  "type": "web",
+  "file": "index.html",
+  "preview": "preview.png",
+  "contentrating": "Everyone",
+  "visibility": "private",
+  "tags": [
+    "Abstract",
+    "Relaxing"
+  ],
+  "general": {
+    "properties": {
+      "about": {
+        "order": 0,
+        "text": "ui_nagi_about",
+        "type": "text",
+        "value": ""
+      },
+      "sound": {
+        "order": 1,
+        "text": "ui_nagi_sound",
+        "type": "bool",
+        "value": true
+      },
+      "volume": {
+        "order": 2,
+        "text": "ui_nagi_volume",
+        "type": "slider",
+        "value": 84,
+        "min": 0,
+        "max": 100,
+        "step": 1,
+        "precision": 0
+      },
+      "showtitle": {
+        "order": 3,
+        "text": "ui_nagi_title",
+        "type": "bool",
+        "value": true
+      },
+      "showcontrols": {
+        "order": 4,
+        "text": "ui_nagi_controls",
+        "type": "bool",
+        "value": true
+      },
+      "toolbarbottom": {
+        "order": 5,
+        "text": "ui_nagi_toolbarbottom",
+        "type": "slider",
+        "value": 80,
+        "min": 0,
+        "max": 240,
+        "step": 4,
+        "precision": 0
+      },
+      "seed": {
+        "order": 6,
+        "text": "ui_nagi_seed",
+        "type": "textinput",
+        "value": ""
+      }
+    },
+    "localization": {
+      "en-us": {
+        "ui_nagi_about": "An endless, slowly evolving space of sound and light.<br><a href=\"https://steamcommunity.com/linkfilter/?u=https%3A%2F%2Fgithub.com%2Ftadazly%2Fnagi\">GitHub</a> · <a href=\"https://steamcommunity.com/id/tadazly/\">Author Steam</a>",
+        "ui_nagi_sound": "Play music",
+        "ui_nagi_volume": "Music volume",
+        "ui_nagi_title": "Show NAGI and Seed",
+        "ui_nagi_controls": "Enable bottom-right toolbar",
+        "ui_nagi_toolbarbottom": "Toolbar bottom spacing (px)",
+        "ui_nagi_seed": "Initial Seed (8 hex digits; blank = random)"
+      },
+      "zh-chs": {
+        "ui_nagi_about": "一个缓慢变化的声音与光的空间。<br><a href=\"https://steamcommunity.com/linkfilter/?u=https%3A%2F%2Fgithub.com%2Ftadazly%2Fnagi\">GitHub</a> · <a href=\"https://steamcommunity.com/id/tadazly/\">作者 Steam</a>",
+        "ui_nagi_sound": "播放生成音乐",
+        "ui_nagi_volume": "音乐音量",
+        "ui_nagi_title": "显示 NAGI 与 Seed",
+        "ui_nagi_controls": "启用右下角工具栏",
+        "ui_nagi_toolbarbottom": "工具栏底部留白（px）",
+        "ui_nagi_seed": "初始 Seed（8 位十六进制，留空随机）"
+      }
+    }
+  }
+}

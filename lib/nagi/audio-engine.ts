@@ -197,6 +197,7 @@ export class NagiAudioEngine {
   private harmonicScene: HarmonicScene;
   private incomingProfile: WeatherProfile | null = null;
   private incomingSeed: string | null = null;
+  private outgoingEmotion: SeedSnapshot['emotion'] | null = null;
   private interactionEnergy = 0;
   private interactionPressed = false;
   private interactionX = 0.5;
@@ -382,7 +383,7 @@ export class NagiAudioEngine {
     this.compressor.knee.value = 24;
     this.compressor.ratio.value = 2;
     this.compressor.attack.value = 0.16;
-    this.compressor.release.value = 1.4;
+    this.compressor.release.value = 1;
     this.limiter = context.createDynamicsCompressor();
     this.limiter.threshold.value = -5.5;
     this.limiter.knee.value = 1.5;
@@ -434,7 +435,7 @@ export class NagiAudioEngine {
     const now = context.currentTime;
     this.playing = true;
     this.master.gain.setValueAtTime(0, now);
-    this.master.gain.linearRampToValueAtTime(this.volume, now + 0.38);
+    this.master.gain.linearRampToValueAtTime(this.muted ? 0.0001 : this.volume, now + 0.38);
     this.nextHarmonyAt = now + 0.025;
     this.scheduleHarmony(this.nextHarmonyAt, true);
     this.nextFxAt = now + 2.1;
@@ -503,6 +504,7 @@ export class NagiAudioEngine {
   }
 
   private beginSeedTransition(seed: string, now: number, fast: boolean) {
+    this.outgoingEmotion = this.getSnapshot().emotion;
     this.incomingSeed = seed;
     this.incomingProfile = profileFromSeed(seed);
     this.pendingForm = emotionalFormFromSeed(seed);
@@ -558,7 +560,8 @@ export class NagiAudioEngine {
     const transition = this.getTransition(now);
     return {
       currentSeed: this.currentSeed,
-      emotion: emotionalFormEmotionAt(this.emotionalForm, this.formSceneIndex),
+      // 音乐先在乐句边界换场时，保留画面过渡的起点。
+      emotion: this.outgoingEmotion ?? emotionalFormEmotionAt(this.emotionalForm, this.formSceneIndex),
       incomingEmotion: this.incomingSeed
         ? initialEmotionFromSeed(this.incomingSeed)
         : null,
@@ -853,6 +856,7 @@ export class NagiAudioEngine {
       this.currentProfile = this.incomingProfile!;
       this.incomingSeed = null;
       this.incomingProfile = null;
+      this.outgoingEmotion = null;
       this.fastSeedTransition = false;
       this.nextSeedAt = now + this.dwellSeconds(this.currentProfile);
       this.options.onSnapshot?.(this.getSnapshot());

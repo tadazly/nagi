@@ -725,13 +725,11 @@ const zeroGainReleaseCount = (
 ).length;
 const prerollSourceCount = (audioEngineSource.match(/start - 0\.008/g) ?? []).length;
 const sceneSource = readFileSync(
-  new URL('../app/nagi-scene.tsx', import.meta.url),
+  new URL('../components/nagi/scene.tsx', import.meta.url),
   'utf8',
 );
-const foregroundShaderSource = sceneSource.slice(
-  sceneSource.indexOf('const CORE_VERTEX_SHADER'),
-  sceneSource.indexOf('type PaletteSet'),
-);
+const shaderSource = readFileSync(new URL('../lib/nagi/shaders.ts', import.meta.url), 'utf8');
+const foregroundShaderSource = shaderSource.slice(shaderSource.indexOf('export const CORE_VERTEX_SHADER'));
 const orbitalSource = sceneSource.slice(
   sceneSource.indexOf('function OrbitalDetails'),
   sceneSource.indexOf('function SceneController'),
@@ -745,8 +743,9 @@ const backdropOwnsRhythm =
   sceneSource.includes('audio.barPhase,') &&
   sceneSource.includes('audio.phrase,');
 const shaderRandomnessIsTemporallyStable =
-  !sceneSource.includes('floor((d + slowTime') &&
-  sceneSource.includes('smoothstep(0.965, 0.997, sparkleNoise)');
+  !shaderSource.includes('floor((d + slowTime') &&
+  !/floor\([^\n]*uSeed/.test(shaderSource) &&
+  shaderSource.includes('smoothstep(0.965, 0.997, sparkleNoise)');
 const engineUsesIndependentRandomDomains = [
   'harmonyRandom',
   'melodyRandom',
@@ -757,6 +756,15 @@ const engineUsesIndependentRandomDomains = [
 ].every((domain) => audioEngineSource.includes(domain));
 
 const assertions = {
+  seedChangesPreserveVisualPhase:
+    !/uTime\s*\*\s*(?:mix\(|\([^\n]*(?:arousal|uEmotion))/.test(shaderSource) &&
+    !/elapsedTime\s*\*\s*\([^\n]*profile/.test(sceneSource),
+  particleDensityDoesNotRecreateGeometry:
+    !sceneSource.includes('<Sparkles') && sceneSource.includes('uDensity.value') &&
+    shaderSource.includes('smoothstep(uDensity - 0.04, uDensity + 0.04, rank)'),
+  visualSeedOriginSurvivesMusicalSceneChanges:
+    audioEngineSource.includes('this.outgoingEmotion = this.getSnapshot().emotion') &&
+    audioEngineSource.includes('emotion: this.outgoingEmotion ??'),
   activeSourceCap: maxActiveSources <= 40,
   accompanimentUsesTransportGrid: maxAccompanimentGridError < 1e-9,
   backgroundRoughnessIsControlled: averageBackgroundRoughness < 0.12,

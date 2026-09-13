@@ -10,15 +10,15 @@ browser check.
 
 | Layer | Source | Generated state |
 | --- | --- | --- |
-| Seed lifecycle | `lib/nagi/generative.ts`, `app/page.tsx` | Cryptographic user seeds, deterministic successor seeds, queued manual changes |
+| Seed lifecycle | `lib/nagi/generative.ts`, `components/nagi/experience.tsx` | Cryptographic user seeds, deterministic successor seeds, queued manual changes |
 | Weather | `lib/nagi/generative.ts` | Brightness, density, depth, flow, hue, motion, shape, space, sparkle, spread, warmth |
 | Macro form | `lib/nagi/generative.ts` | Statement, development, intensification, release, return; twelve emotional identities |
 | Harmony | `lib/nagi/generative.ts` | Twelve modes, tonal centres, functional progressions, chord colour, pivots, voice leading |
 | Rhythm and motif | `lib/nagi/composition.ts`, `lib/nagi/classical-prior.ts` | Meter-aware Euclidean grids, corpus-informed contours and rhythms, motif evolution |
 | Orchestration | `lib/nagi/performance.ts` | Five roles, seventeen instruments, formal-stage-aware hand-offs and expression |
 | Synthesis and mix | `lib/nagi/audio-engine.ts` | Additive waves, filtered noise/transients, envelopes, vibrato, delay, convolution, dynamics |
-| Interaction | `app/page.tsx`, `lib/nagi/audio-engine.ts` | Pointer energy, spatial movement, short quantized tonal ripples, playback and volume |
-| Visual generation | `app/nagi-scene.tsx`, `lib/nagi/visual-presets.ts` | 36 emotion-specific shader templates, palettes, weather, core geometry, particles and post FX |
+| Interaction | `components/nagi/experience.tsx`, `lib/nagi/audio-engine.ts` | Pointer energy, spatial movement, short quantized tonal ripples, playback and volume |
+| Visual generation | `components/nagi/scene.tsx`, `lib/nagi/shaders.ts`, `lib/nagi/visual-presets.ts` | 36 emotion-specific shader templates, palettes, weather, core geometry, particles and post FX |
 | Long-run audit | `scripts/soak-audit.mjs` | 24 simulated hours plus 2,048-seed distribution and determinism sweeps |
 
 No uncontrolled `Math.random()` path remains. A displayed eight-digit seed is
@@ -129,6 +129,10 @@ Device pixel ratio is recomputed after viewport changes, with a mobile cap, so
 responsive testing does not leave the renderer at a stale quality setting.
 
 ### Interaction and accessibility
+
+指针运动通过 `lib/nagi/pointer-field.ts` 的临界阻尼弹簧更新，形变使用平滑后的速度和按压力度。核心与外层共用局部凹陷，穿过中心不会翻转方向；工具栏操作不触发主体按压。`npm run test:pointer` 检查快速反向、释放、后台恢复，以及 30、60、144 FPS 的响应一致性。
+
+Seed 过渡期间，场景每帧读取同一份实时快照。旋转与 Shader 相位累积每帧的运动量，改变速度不会重新计算过去的位置。粒子持续漂移，密度通过透明度渐变，避免数量变化时重建整片粒子；音乐先换场时，保留视觉过渡的起始情绪直到 Seed 交接结束。
 
 The disappearing controls remain visually quiet, but they are no longer removed
 from keyboard order or placed inside an `aria-hidden` subtree. Tabbing into the
